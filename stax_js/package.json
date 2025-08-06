@@ -1,0 +1,42 @@
+{
+  "name": "@matricom/staxdb",
+  "version": "0.5.03",
+  "description": "A high-performance, zero-copy, embeddable object-graph database for Node.js, built with C++.",
+  "main": "index.js",
+  "author": "matricom",
+  "license": "SEE LICENSE IN LICENSE.md",
+  "homepage": "https://github.com/your-repo/StaxDB",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/your-repo/StaxDB.git"
+  },
+  "keywords": [
+    "database",
+    "embedded",
+    "key-value",
+    "graph",
+    "zero-copy",
+    "native",
+    "fast",
+    "napi",
+    "c++"
+  ],
+  "gypfile": true,
+  "files": [
+    "index.js",
+    "postinstall.js",
+    "prebuilds/",
+    "README.md",
+    "LICENSE.md"
+  ],
+  "scripts": {
+    "install": "node postinstall.js",
+    "test": "node test.js",
+    "bench": "node bench.js",
+    "profile": "node profile_bench.js"
+  },
+  "dependencies": {
+    "node-addon-api": "^7.1.0"
+  },
+  "devDependencies": {}
+}

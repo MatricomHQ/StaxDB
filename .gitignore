@@ -1,0 +1,33 @@
+build
+third_party
+db_data
+all_code.txt
+# Build artifacts
+build/
+bin/
+*.o
+*.a
+*.so
+*.dylib
+*.dll
+*.lib
+*.exp
+
+# CMake files
+CMakeCache.txt
+CMakeFiles/
+cmake_install.cmake
+Makefile
+
+# VSCode settings
+.vscode/
+
+# macOS files
+.DS_Store
+
+# Logs
+server_log.txt
+
+# Node.js specific
+node_modules/
+*.node

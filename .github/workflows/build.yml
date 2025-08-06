@@ -1,0 +1,70 @@
+name: StaxDB C++ CI Build & Test
+
+# Triggers for the workflow
+on:
+  push:
+    branches:
+      - main
+  pull_request:
+    branches:
+      - main
+
+jobs:
+  build:
+    # A job named 'build'
+    name: Build and Run on ${{ matrix.os }} (${{ matrix.build_type }})
+    runs-on: ${{ matrix.os }}
+
+    # Strategy for the build matrix
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest, windows-latest]
+        build_type: [Release] # Sticking to Release for CI speed, can add Debug if needed
+
+    # Steps for the job
+    steps:
+      # Step 1: Checkout the repository
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      # Step 2: Install build tools on Ubuntu
+      - name: Install build-essential & CMake (Ubuntu)
+        if: matrix.os == 'ubuntu-latest'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y build-essential cmake
+
+      # Step 3: Install C++ build tools (Windows)
+      - name: Install MSBuild & CMake (Windows)
+        if: runner.os == 'Windows'
+        uses: microsoft/setup-msbuild@v1.1
+        with:
+          msbuild-architecture: 'x64'
+
+      # On macOS, build tools (Xcode Command Line Tools) and CMake are generally available.
+
+      # Step 4: Build the C++ project using the Makefile
+      - name: Build C++ Project
+        run: make build-cpp
+        shell: bash
+
+      # Step 5: Run C++ Benchmarks and Tests
+      - name: Run C++ Executable (stax_benchmark)
+        run: |
+          if [ "${{ runner.os }}" == "Windows" ]; then
+            ./bin/stax_benchmark.exe
+          else
+            ./bin/stax_benchmark
+          fi
+        shell: bash
+
+      # Step 6: Upload Binaries Artifact
+      - name: Upload Binaries
+        uses: actions/upload-artifact@v4
+        with:
+          name: staxdb-binaries-${{ matrix.os }}-${{ matrix.build_type }}
+          path: bin/ # The output directory is now 'bin'
+          if-no-files-found: error

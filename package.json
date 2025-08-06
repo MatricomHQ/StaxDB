@@ -1,0 +1,6 @@
+{
+  "dependencies": {
+    "lmdb": "^3.4.1",
+    "rocksdb": "^5.2.1"
+  }
+}

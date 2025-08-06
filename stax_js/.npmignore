@@ -1,0 +1,18 @@
+# Build artifacts
+/build
+/staxdb_test_data_temp
+*.log
+
+# Source files and build configurations
+binding.gyp
+stax_node_api/
+../src/
+
+# Development scripts
+prebuild.js
+profile_bench.js
+bench.js
+
+# Local dependencies
+/node_modules
+package-lock.json

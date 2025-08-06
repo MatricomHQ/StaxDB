@@ -1,0 +1,56 @@
+#pragma once
+
+#ifdef __cplusplus
+#include <cstdint>
+#include <cstddef>
+#else
+#include <stdint.h>
+#include <stddef.h>
+#endif
+
+#define DB_MAX_VIRTUAL_SIZE (128ULL * 1024 * 1024 * 1024)
+#define DB_FILE_EXTENSION_SIZE (64 * 1024 * 1024)
+#define MAX_CONCURRENT_THREADS 64
+#define MAX_COLLECTIONS_PER_DB_INITIAL 64
+
+#define NODE_ALLOCATOR_CHUNK_SIZE (16 * 1024)
+#define RECORD_ALLOCATOR_CHUNK_SIZE (1 * 1024 * 1024)
+
+#define TLAB_SIZE_BYTES_NODES NODE_ALLOCATOR_CHUNK_SIZE
+#define TLAB_SIZE_BYTES_RECORDS RECORD_ALLOCATOR_CHUNK_SIZE
+
+#define ROARING_ARRAY_TO_BITSET_CONVERSION_THRESHOLD_INTERNAL 4096
+#define ROARING_BITSET_CONTAINER_SIZE_IN_ELEMENTS_INTERNAL 65536
+#define ROARING_BITSET_CONTAINER_SIZE_IN_U64_INTERNAL 1024
+
+#define MAX_IDS_IN_GRAPH 10000000
+#define MAX_GRAPH_BATCH_KEY_DATA_SIZE (512 * 1024)
+
+#define MAX_GRAPH_BYTES_PER_KV_ENTRY 24
+#define MAX_GRAPH_KV_PAIRS_PER_BATCH (MAX_GRAPH_BATCH_KEY_DATA_SIZE / MAX_GRAPH_BYTES_PER_KV_ENTRY)
+#define GRAPH_BATCH_FLUSH_THRESHOLD_KVS (size_t)(MAX_GRAPH_KV_PAIRS_PER_BATCH * 0.90)
+
+#define LIBRARIAN_WAKE_UP_INTERVAL_SECONDS 2
+
+#define BENCHMARK_NUM_THREADS 8
+#define BENCHMARK_NUM_ENTRIES_TOTAL 1'000'000
+
+#define SHM_NAME_REQ "/staxdb_req"
+#define SHM_NAME_RESP "/staxdb_resp"
+#define SEM_NAME_CLIENT_NOTIFIES_DAEMON "/staxdb_client_notify"
+#define SEM_NAME_DAEMON_NOTIFIES_CLIENT "/staxdb_daemon_notify"
+#define PID_FILE "/tmp/staxdb.pid"
+#define SHM_SIZE (1024 * 1024 * 16)
+
+
+enum StaxValueType : uint8_t
+{
+    String = 1,
+    Numeric = 2,
+    Bool = 3,
+    Null = 4,
+    Json = 5,
+    
+    Relationship = 6,
+    Geo = 7
+};
