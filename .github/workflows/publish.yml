@@ -97,27 +97,13 @@ jobs:
           set -e
           echo "--- Consolidating pre-built binaries ---"
           mkdir -p stax_js/prebuilds
-          find prebuilds-all -type f -name 'staxdb.node' -exec sh -c ' \
-            PLATFORM_OS_ARCH=$(basename $(dirname $(dirname {}))); \
-            PLATFORM_OS_ARCH=${PLATFORM_OS_ARCH#prebuilds-}; \
 
-            DEST_PLATFORM=""; \
-            if [[ "$PLATFORM_OS_ARCH" == "ubuntu-latest-x64" ]]; then \
-              DEST_PLATFORM="linux-x64"; \
-            elif [[ "$PLATFORM_OS_ARCH" == "macos-latest-x64" ]]; then \
-              DEST_PLATFORM="darwin-x64"; \
-            elif [[ "$PLATFORM_OS_ARCH" == "macos-latest-arm64" ]]; then \
-              DEST_PLATFORM="darwin-arm64"; \
-            else \
-              echo "Unknown platform-arch: $PLATFORM_OS_ARCH. Copying as is."; \
-              DEST_PLATFORM="$PLATFORM_OS_ARCH"; \
-            fi; \
-            
-            DEST_DIR="stax_js/prebuilds/$DEST_PLATFORM"; \
-            mkdir -p "$DEST_DIR"; \
-            cp "$1" "$DEST_DIR/staxdb.node"; \
-            echo "Copied $1 to $DEST_DIR/staxdb.node"; \
-          ' sh {} \;
+          echo "Downloaded artifact structure:"
+          ls -R prebuilds-all/
+
+          # Copy the contents of each artifact's staging directory into the final prebuilds directory.
+          # The '*' glob will expand to the platform-specific directories we created (e.g., darwin-arm64).
+          cp -r prebuilds-all/prebuilds-*/prebuilds-staging/* stax_js/prebuilds/
           
           echo "--- Final prebuilds directory structure ---"
           ls -R stax_js/prebuilds
