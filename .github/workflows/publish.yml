@@ -18,7 +18,6 @@ jobs:
         include:
           - arch: x64
           - arch: arm64
-
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
@@ -47,51 +46,34 @@ jobs:
           path: prebuilds-staging/
 
   build-linux:
-    name: Build for Linux (x64) using manylinux
+    name: Build for Linux (x64)
     runs-on: ubuntu-latest
-
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
-
-      - name: Build inside manylinux2014 container
+      - name: Build with official Node.js container
         run: |
-          docker run --rm -v ${{ github.workspace }}:/work -w /work quay.io/pypa/manylinux2014_x86_64 \
-          bash -c '
-            set -ex
+          docker run --rm --user root \
+            -v ${{ github.workspace }}:/work \
+            -w /work \
+            node:20-bookworm \
+            bash -c '
+              set -ex
 
-            # Enable modern C++ compiler from the toolset
-            source /opt/rh/devtoolset-10/enable
-            
-            # Install build dependencies for Node.js itself
-            yum install -y libatomic
+              # Install necessary build tools inside the Node container
+              apt-get update
+              apt-get install -y --no-install-recommends build-essential python3
 
-            # Install NVM
-            export NVM_DIR="/root/.nvm"
-            curl -o- https://raw.githubusercontent.com/nvm-sh/nvm/v0.39.7/install.sh | bash
-            source "$NVM_DIR/nvm.sh"
-            
-            # --------------------- THE CRITICAL FIX ---------------------
-            # Force NVM to compile Node.js from source using the -s flag.
-            # This ensures the `node` executable is compatible with the container.
-            # ------------------------------------------------------------
-            nvm install 20 -s
-            nvm use 20
+              # Navigate to the package and build the addon
+              cd stax_js
+              npm install --ignore-scripts --unsafe-perm
+              npm exec -- node-gyp rebuild
 
-            # Verify the node executable is now compatible
-            ldd $(which node)
-
-            # Navigate to the package and build the addon
-            cd stax_js
-            npm install --ignore-scripts --unsafe-perm
-            npm exec -- node-gyp rebuild
-
-            # Stage the final binary
-            PLATFORM_DIR="linux-x64-glibc"
-            mkdir -p /work/prebuilds-staging/${PLATFORM_DIR}
-            cp build/Release/staxdb.node /work/prebuilds-staging/${PLATFORM_DIR}/staxdb.node
-          '
-      
+              # Stage the final binary
+              PLATFORM_DIR="linux-x64-glibc"
+              mkdir -p /work/prebuilds-staging/${PLATFORM_DIR}
+              cp build/Release/staxdb.node /work/prebuilds-staging/${PLATFORM_DIR}/staxdb.node
+            '
       - name: Upload binary artifact
         uses: actions/upload-artifact@v4
         with:
@@ -102,7 +84,6 @@ jobs:
     name: Publish to NPM
     needs: [build-macos, build-linux]
     runs-on: ubuntu-latest
-
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
