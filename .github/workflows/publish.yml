@@ -60,20 +60,21 @@ jobs:
             bash -c '
               set -ex
 
-              # --------------------- THE CRITICAL FIX ---------------------
-              # Install a modern C++ compiler (g++-12) and other essentials.
-              # The base image has a compiler that is too old for your C++ code.
-              # ------------------------------------------------------------
+              # Install a modern C++ compiler (g++-12) and other essentials
               apt-get update
               apt-get install -y --no-install-recommends g++-12 python3
 
-              # Tell the build system to use the new compiler
-              export CXX=g++-12
-
-              # Navigate to the package and build the addon
+              # Navigate to the package
               cd stax_js
+
+              # Install dependencies
               npm install --ignore-scripts --unsafe-perm
-              npm exec -- node-gyp rebuild
+
+              # --------------------- THE CRITICAL FIX ---------------------
+              # Force node-gyp to use the g++-12 compiler via npm config.
+              # This overrides any defaults and is the definitive way.
+              # ------------------------------------------------------------
+              npm_config_cxx=g++-12 npm exec -- node-gyp rebuild
 
               # Stage the final binary
               PLATFORM_DIR="linux-x64-glibc"
