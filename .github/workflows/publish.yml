@@ -16,9 +16,8 @@ jobs:
     strategy:
       matrix:
         include:
-          # This will run on an x64 runner for both archs
           - arch: x64
-          - arch: arm64 # We will cross-compile for arm64 on the x64 runner
+          - arch: arm64
 
     steps:
       - name: Checkout repository
@@ -46,7 +45,6 @@ jobs:
           fi
 
           echo "--- Staging pre-built binary ---"
-          # FIX: Removed invalid 'local' keyword
           PLATFORM_DIR="darwin-${{ matrix.arch }}"
           
           mkdir -p ../prebuilds-staging/${PLATFORM_DIR}
@@ -62,57 +60,45 @@ jobs:
   build-linux:
     name: Build for Linux (x64) using manylinux
     runs-on: ubuntu-latest
-    # FIX: Use a container with a compatible C++ compiler toolchain for manylinux
-    # The manylinux2014 image has an old GCC. The devtoolset-10 provides a modern GCC while still linking to old glibc.
-    container:
-      image: quay.io/pypa/manylinux2014_x86_64
+    # We will NOT use a container: block. We will run docker commands manually.
 
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
 
-      - name: Set up Environment and Install Node.js
-        # FIX: Manually install Node.js inside the container to avoid glibc conflicts.
-        # Use devtoolset-10 to get a modern C++ compiler.
-        shell: bash
+      - name: Build inside manylinux2014 container
+        # FIX: Run the entire build process inside a Docker container
+        # We mount the workspace and define an output directory
         run: |
-          set -e
-          source /opt/rh/devtoolset-10/enable
-          
-          # Install NVM and a compatible Node.js version
-          export NVM_DIR="$HOME/.nvm"
-          curl -o- https://raw.githubusercontent.com/nvm-sh/nvm/v0.39.7/install.sh | bash
-          source "$NVM_DIR/nvm.sh"
-          nvm install 20
-          nvm use 20
-          
-          # Add Node to the path for subsequent steps
-          echo "$NVM_DIR/versions/node/$(nvm current)/bin" >> $GITHUB_PATH
-
-      - name: Build native addon for Linux
-        shell: bash
-        run: |
-          set -e
-          # Activate the modern compiler toolchain again
-          source /opt/rh/devtoolset-10/enable
-          
-          cd stax_js
-
-          echo "--- Installing Node.js dependencies ---"
-          # The --unsafe-perm flag is needed when running as root in a container
-          npm install --ignore-scripts --unsafe-perm
-
-          echo "--- Compiling native addon for linux-x64-glibc ---"
-          npm exec -- node-gyp rebuild
-
-          echo "--- Staging pre-built binary ---"
-          # Name the directory to match your postinstall script's logic
-          PLATFORM_DIR="linux-x64-glibc"
-          
-          mkdir -p ../prebuilds-staging/${PLATFORM_DIR}
-          cp build/Release/staxdb.node ../prebuilds-staging/${PLATFORM_DIR}/staxdb.node
-          echo "Binary staged to ../prebuilds-staging/${PLATFORM_DIR}/staxdb.node"
-
+          docker run --rm \
+            -v ${{ github.workspace }}:/work \
+            -w /work \
+            quay.io/pypa/manylinux2014_x86_64 \
+            bash -c '
+              set -e
+              # Use the modern compiler toolchain available in the image
+              source /opt/rh/devtoolset-10/enable
+              
+              # Install NVM and Node.js
+              export NVM_DIR="/root/.nvm"
+              curl -o- https://raw.githubusercontent.com/nvm-sh/nvm/v0.39.7/install.sh | bash
+              source "$NVM_DIR/nvm.sh"
+              nvm install 20
+              nvm use 20
+              
+              # Navigate to the correct directory
+              cd stax_js
+              
+              # Install dependencies and build
+              npm install --ignore-scripts --unsafe-perm
+              npm exec -- node-gyp rebuild
+              
+              # Stage the artifact in a directory the host can access
+              PLATFORM_DIR="linux-x64-glibc"
+              mkdir -p /work/prebuilds-staging/${PLATFORM_DIR}
+              cp build/Release/staxdb.node /work/prebuilds-staging/${PLATFORM_DIR}/staxdb.node
+            '
+      
       - name: Upload binary artifact
         uses: actions/upload-artifact@v4
         with:
@@ -121,7 +107,7 @@ jobs:
 
   publish:
     name: Publish to NPM
-    needs: [build-macos, build-linux] # Depend on both build jobs
+    needs: [build-macos, build-linux]
     runs-on: ubuntu-latest
 
     steps:
@@ -138,10 +124,6 @@ jobs:
         uses: actions/download-artifact@v4
         with:
           path: stax_js/prebuilds
-          # New simplified download strategy:
-          # This pattern will match all artifacts and merge them.
-          # The result is that each artifact's content (the platform-specific folder)
-          # is placed directly into the target `path`.
           pattern: prebuilds-*
           merge-multiple: true
 
@@ -149,16 +131,10 @@ jobs:
         shell: bash
         run: |
           set -e
-          
           echo "--- Final prebuilds directory structure ---"
           ls -R stax_js/prebuilds
-          
           cd stax_js
-          
-          echo "--- Installing dependencies for publishing ---"
           npm install --ignore-scripts
-
-          echo "--- Publishing to NPM ---"
           npm publish --access public
         env:
           NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
