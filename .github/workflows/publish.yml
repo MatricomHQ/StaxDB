@@ -56,7 +56,9 @@ jobs:
           echo "--- Staging pre-built binary ---"
           PLATFORM_DIR=""
           if [[ "${{ runner.os }}" == "Linux" ]]; then
-              PLATFORM_DIR="linux-x64"
+              # !!! BUG FIX !!! Align with postinstall.js detection logic
+              # GitHub runners use glibc, so we create a libc-specific directory.
+              PLATFORM_DIR="linux-x64-glibc"
           elif [[ "${{ runner.os }}" == "macOS" ]]; then
               PLATFORM_DIR="darwin-${{ matrix.arch }}"
           fi
@@ -100,10 +102,7 @@ jobs:
 
           echo "Downloaded artifact structure:"
           ls -R prebuilds-all/
-
-          # !!! BUG FIX !!!
-          # The previous glob pattern was incorrect. The correct pattern is `prebuilds-all/prebuilds-*/*`
-          # which copies the platform directories (e.g., 'darwin-arm64') into stax_js/prebuilds/.
+          
           cp -r prebuilds-all/prebuilds-*/* stax_js/prebuilds/
           
           echo "--- Final prebuilds directory structure ---"
