@@ -32,7 +32,7 @@ jobs:
 
       # Step 2: Install build tools on Ubuntu
       - name: Install build-essential & CMake (Ubuntu)
-        if: matrix.os == 'ubuntu-latest'
+        if: runner.os == 'Linux'
         run: |
           sudo apt-get update
           sudo apt-get install -y build-essential cmake
@@ -40,14 +40,16 @@ jobs:
       # Step 3: Install C++ build tools (Windows)
       - name: Install MSBuild & CMake (Windows)
         if: runner.os == 'Windows'
-        uses: microsoft/setup-msbuild@v1.1
-        with:
-          msbuild-architecture: 'x64'
+        # MSBuild is part of the runner image. We just need to ensure CMake is available.
+        # The default shell on Windows is PowerShell, so we need to be explicit.
+        run: choco install cmake --installargs 'ADD_CMAKE_TO_PATH=System'
+        shell: pwsh
 
       # On macOS, build tools (Xcode Command Line Tools) and CMake are generally available.
 
       # Step 4: Build the C++ project using the Makefile
       - name: Build C++ Project
+        # Explicitly using bash shell ensures consistency across runners
         run: make build-cpp
         shell: bash
 
