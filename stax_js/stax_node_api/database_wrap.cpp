@@ -32,6 +32,12 @@ Napi::Value DropSync(const Napi::CallbackInfo& info) {
     return env.Undefined();
 }
 
+// This function can now be a static method.
+Napi::Value GetLastError(const Napi::CallbackInfo& info) {
+    Napi::Env env = info.Env();
+    return Napi::String::New(env, staxdb_get_last_error());
+}
+
 
 Napi::Object DatabaseWrap::Init(Napi::Env env, Napi::Object exports) {
     Napi::Function func = DefineClass(env, "StaxDB", {
@@ -43,7 +49,12 @@ Napi::Object DatabaseWrap::Init(Napi::Env env, Napi::Object exports) {
         InstanceMethod("executeBatch", &DatabaseWrap::ExecuteBatch),
         InstanceMethod("insertBatchAsync", &DatabaseWrap::InsertBatchAsync),
         InstanceMethod("multiGetAsync", &DatabaseWrap::MultiGetAsync),
-        StaticMethod("dropSync", DropSync)
+        StaticMethod("dropSync", DropSync),
+        // !!! BUG FIX !!!
+        // Root Cause: MSVC compiler fails template deduction on Napi::Function::New for plain function pointers.
+        // Fix: Expose `getLastError` as a static method on the class itself. This is a more robust
+        // and idiomatic way to handle this in node-addon-api and avoids compiler issues.
+        StaticMethod("getLastError", GetLastError)
     });
     constructor = Napi::Persistent(func);
     constructor.SuppressDestruct();
@@ -742,10 +753,6 @@ void DatabaseWrap::MultiGetAsync(const Napi::CallbackInfo& info) {
 }
 
 
-Napi::Value GetLastError(const Napi::CallbackInfo& info) {
-    Napi::Env env = info.Env();
-    return Napi::String::New(env, staxdb_get_last_error());
-}
 
 
 Napi::Object Initialize(Napi::Env env, Napi::Object exports) {
@@ -755,7 +762,6 @@ Napi::Object Initialize(Napi::Env env, Napi::Object exports) {
     GraphWrap::Init(env, exports);
     KVTransactionWrap::Init(env, exports);
     GraphTransactionWrap::Init(env, exports);
-    exports.Set(Napi::String::New(env, "getLastError"), Napi::Function::New(env, GetLastError, "getLastError"));
     return exports;
 }
 

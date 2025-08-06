@@ -34,17 +34,33 @@ jobs:
 
       - name: Install C++ build tools (Linux)
         if: runner.os == 'Linux'
-        run: sudo apt-get update && sudo apt-get install -y build-essential
+        run: sudo apt-get update && sudo apt-get install -y build-essential cmake
 
       - name: Install C++ build tools (Windows)
         if: runner.os == 'Windows'
-        # !!! BUG FIX !!! Corrected action for MSVC setup
-        uses: microsoft/setup-msbuild@v1.1 
-        with:
-          msbuild-version: 'latest'
-          # visualstudio-version: 'latest' # Not needed with msbuild-version
+        uses: microsoft/setup-msbuild@v1.1
       
-      # For macOS, Xcode Command Line Tools are pre-installed on runners
+      - name: Install C++ build tools (macOS)
+        if: runner.os == 'macOS'
+        run: brew install cmake
+      
+      - name: Build C++ executables
+        shell: bash
+        run: |
+          set -e
+          echo "--- Building C++ binaries with CMake ---"
+          mkdir -p build/release
+          cd build/release
+          cmake ../.. -DCMAKE_BUILD_TYPE=Release
+          cmake --build .
+          echo "--- C++ binaries built successfully ---"
+          ls -l ../../bin/
+
+      - name: Run C++ Benchmarks
+        shell: bash
+        run: |
+          echo "--- Running C++ stax_benchmark executable ---"
+          ./bin/stax_benchmark
 
       - name: Build native addon
         id: build_addon
@@ -57,29 +73,42 @@ jobs:
           npm install --ignore-scripts
 
           echo "--- Compiling native addon for ${{ matrix.os }}-${{ matrix.arch }} ---"
-          if [[ "${{ matrix.os }}" == "macos-latest" && "${{ matrix.arch }}" == "arm64" ]]; then
+          if [[ "${{ runner.os }}" == "macOS" && "${{ matrix.arch }}" == "arm64" ]]; then
             npm exec -- node-gyp rebuild --arch=arm64 --target_arch=arm64
           else
             npm exec -- node-gyp rebuild
           fi
 
+      - name: Run Node.js Tests
+        shell: bash
+        run: |
+          echo "--- Running Node.js test suite ---"
+          cd stax_js
+          npm test
+
+      - name: Run Node.js Benchmarks
+        shell: bash
+        run: |
+          echo "--- Running Node.js benchmark suite ---"
+          cd stax_js
+          npm run bench
+
+      - name: Stage binary for artifact upload
+        shell: bash
+        run: |
           echo "--- Staging pre-built binary ---"
           PLATFORM_DIR=""
-          if [[ "${{ runner.os }}" == "Linux" ]]; then # Use exact OS name from runner output
+          if [[ "${{ runner.os }}" == "Linux" ]]; then
               PLATFORM_DIR="linux-x64"
-          elif [[ "${{ runner.os }}" == "Windows" ]]; then # Use exact OS name from runner output
+          elif [[ "${{ runner.os }}" == "Windows" ]]; then
               PLATFORM_DIR="win32-x64"
-          elif [[ "${{ runner.os }}" == "macOS" ]]; then # Use exact OS name from runner output
+          elif [[ "${{ runner.os }}" == "macOS" ]]; then
               PLATFORM_DIR="darwin-${{ matrix.arch }}"
           fi
           
-          # Adjust for potential inconsistencies in runner.os value vs expected platform naming
-          # The prebuild.js script inside stax_js already handles this robustly,
-          # so we just need a consistent staging dir for artifact upload/download
-          
-          mkdir -p ../prebuilds-staging/${PLATFORM_DIR}
-          cp build/Release/staxdb.node ../prebuilds-staging/${PLATFORM_DIR}/staxdb.node
-          echo "Binary staged to ../prebuilds-staging/${PLATFORM_DIR}/staxdb.node"
+          mkdir -p prebuilds-staging/${PLATFORM_DIR}
+          cp stax_js/build/Release/staxdb.node prebuilds-staging/${PLATFORM_DIR}/staxdb.node
+          echo "Binary staged to prebuilds-staging/${PLATFORM_DIR}/staxdb.node"
 
       - name: Upload binary artifact
         uses: actions/upload-artifact@v4
@@ -113,14 +142,9 @@ jobs:
           set -e
           echo "--- Consolidating pre-built binaries ---"
           mkdir -p stax_js/prebuilds
-          # The artifacts are downloaded into subdirectories named after the artifact name
-          # e.g., prebuilds-all/prebuilds-ubuntu-latest-x64/
+          
           find prebuilds-all -type f -name 'staxdb.node' -exec sh -c ' \
-            # Extract the platform-arch part from the path, e.g., "ubuntu-latest-x64"
-            # and transform it to "linux-x64", "win32-x64", "darwin-x64", "darwin-arm64"
             PLATFORM_OS_ARCH=$(basename $(dirname $(dirname {}))); \
-            
-            # Remove "prebuilds-" prefix if present
             PLATFORM_OS_ARCH=${PLATFORM_OS_ARCH#prebuilds-}; \
 
             DEST_PLATFORM=""; \
