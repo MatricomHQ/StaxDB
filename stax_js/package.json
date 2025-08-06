@@ -1,6 +1,6 @@
 {
   "name": "@matricom/staxdb",
-  "version": "0.5.10",
+  "version": "0.5.12",
   "description": "A high-performance, zero-copy, embeddable object-graph database for Node.js, built with C++.",
   "main": "index.js",
   "author": "matricom",

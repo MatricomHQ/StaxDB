@@ -1,25 +1,24 @@
+# .github/workflows/publish.yml
+
 name: Publish StaxDB to NPM
 
 on:
   push:
     branches:
-      - 'release-test' # Trigger on pushes to the 'release-test' branch for iterative testing
+      - 'release-test' # Trigger on pushes to 'release-test' for iterative testing
     # tags:
     #   - 'v*.*.*' # Uncomment this for actual release publishing
 
 jobs:
-  build:
-    name: Build for ${{ matrix.os }} (${{ matrix.arch }})
-    runs-on: ${{ matrix.os }}
+  build-macos:
+    name: Build for macOS (${{ matrix.arch }})
+    runs-on: macos-latest
     strategy:
       matrix:
         include:
-          - os: ubuntu-latest
-            arch: x64
-          - os: macos-latest # This will run on an x64 runner
-            arch: x64
-          - os: macos-latest # We will cross-compile for arm64 on the x64 runner
-            arch: arm64
+          # This will run on an x64 runner for both archs
+          - arch: x64
+          - arch: arm64 # We will cross-compile for arm64 on the x64 runner
 
     steps:
       - name: Checkout repository
@@ -30,13 +29,9 @@ jobs:
         with:
           node-version: '20'
 
-      - name: Install C++ build tools (Linux)
-        if: runner.os == 'Linux'
-        run: sudo apt-get update && sudo apt-get install -y build-essential
-      
-      # For macOS, Xcode Command Line Tools are pre-installed on runners
+      # Xcode Command Line Tools are pre-installed on macOS runners
 
-      - name: Build native addon
+      - name: Build native addon for macOS
         id: build_addon
         shell: bash
         run: |
@@ -46,22 +41,15 @@ jobs:
           echo "--- Installing Node.js dependencies ---"
           npm install --ignore-scripts
 
-          echo "--- Compiling native addon for ${{ matrix.os }}-${{ matrix.arch }} ---"
-          if [[ "${{ matrix.os }}" == "macos-latest" && "${{ matrix.arch }}" == "arm64" ]]; then
+          echo "--- Compiling native addon for darwin-${{ matrix.arch }} ---"
+          if [[ "${{ matrix.arch }}" == "arm64" ]]; then
             npm exec -- node-gyp rebuild --arch=arm64 --target_arch=arm64
           else
             npm exec -- node-gyp rebuild
           fi
 
           echo "--- Staging pre-built binary ---"
-          PLATFORM_DIR=""
-          if [[ "${{ runner.os }}" == "Linux" ]]; then
-              # !!! BUG FIX !!! Align with postinstall.js detection logic
-              # GitHub runners use glibc, so we create a libc-specific directory.
-              PLATFORM_DIR="linux-x64-glibc"
-          elif [[ "${{ runner.os }}" == "macOS" ]]; then
-              PLATFORM_DIR="darwin-${{ matrix.arch }}"
-          fi
+          local PLATFORM_DIR="darwin-${{ matrix.arch }}"
           
           mkdir -p ../prebuilds-staging/${PLATFORM_DIR}
           cp build/Release/staxdb.node ../prebuilds-staging/${PLATFORM_DIR}/staxdb.node
@@ -70,12 +58,60 @@ jobs:
       - name: Upload binary artifact
         uses: actions/upload-artifact@v4
         with:
-          name: prebuilds-${{ matrix.os }}-${{ matrix.arch }}
+          # Use a consistent prefix for all build artifacts
+          name: prebuilds-macos-${{ matrix.arch }}
+          path: prebuilds-staging/
+
+  build-linux:
+    name: Build for Linux (x64) using manylinux
+    runs-on: ubuntu-latest
+    container:
+      # Use the manylinux2014 image for broad compatibility
+      image: quay.io/pypa/manylinux2014_x86_64
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Node.js in Container
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          
+      # The manylinux container already has build tools (GCC, etc.)
+
+      - name: Build native addon for Linux
+        id: build_addon
+        shell: bash
+        run: |
+          set -e
+          cd stax_js
+
+          echo "--- Installing Node.js dependencies ---"
+          # The --unsafe-perm flag is often needed when running as root in a container
+          npm install --ignore-scripts --unsafe-perm
+
+          echo "--- Compiling native addon for linux-x64-glibc ---"
+          npm exec -- node-gyp rebuild
+
+          echo "--- Staging pre-built binary ---"
+          # Name the directory to match your postinstall script's logic
+          local PLATFORM_DIR="linux-x64-glibc"
+          
+          mkdir -p ../prebuilds-staging/${PLATFORM_DIR}
+          cp build/Release/staxdb.node ../prebuilds-staging/${PLATFORM_DIR}/staxdb.node
+          echo "Binary staged to ../prebuilds-staging/${PLATFORM_DIR}/staxdb.node"
+
+      - name: Upload binary artifact
+        uses: actions/upload-artifact@v4
+        with:
+          # Use a consistent prefix for all build artifacts
+          name: prebuilds-linux-x64
           path: prebuilds-staging/
 
   publish:
     name: Publish to NPM
-    needs: build
+    needs: [build-macos, build-linux] # Depend on both build jobs
     runs-on: ubuntu-latest
 
     steps:
@@ -92,18 +128,24 @@ jobs:
         uses: actions/download-artifact@v4
         with:
           path: prebuilds-all/
-      
+          # This pattern will match all artifacts starting with 'prebuilds-'
+          pattern: prebuilds-*
+          merge-multiple: true # This merges all artifacts into a single directory
+
       - name: Prepare package for publishing
         shell: bash
         run: |
           set -e
           echo "--- Consolidating pre-built binaries ---"
-          mkdir -p stax_js/prebuilds
-
-          echo "Downloaded artifact structure:"
-          ls -R prebuilds-all/
           
-          cp -r prebuilds-all/prebuilds-*/* stax_js/prebuilds/
+          # The 'merge-multiple' option in download-artifact simplifies this.
+          # All artifacts are now directly inside prebuilds-all/
+          echo "Downloaded and merged artifact structure:"
+          ls -R prebuilds-all/
+
+          # Copy the platform-specific directories into the final location
+          mkdir -p stax_js/prebuilds
+          cp -r prebuilds-all/* stax_js/prebuilds/
           
           echo "--- Final prebuilds directory structure ---"
           ls -R stax_js/prebuilds
@@ -111,7 +153,6 @@ jobs:
           echo "--- Installing dependencies for publishing ---"
           cd stax_js
           npm install --ignore-scripts
-
 
       - name: Publish to NPM
         run: |
