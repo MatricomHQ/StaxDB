@@ -96,17 +96,17 @@ uint32_t hash_fnv1a_32(std::string_view s);
 struct GlobalIDMapShim
 {
 
-    constexpr uint32_t get_or_create_id(std::string_view s) const
+    uint32_t get_or_create_id(std::string_view s) const
     {
         return hash_fnv1a_32(s);
     }
 
-    constexpr uint32_t get_id(std::string_view s) const
+    uint32_t get_id(std::string_view s) const
     {
         return hash_fnv1a_32(s);
     }
 
-    constexpr uint32_t get_total_ids_generated() const
+    uint32_t get_total_ids_generated() const
     {
         return 0;
     }
