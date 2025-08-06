@@ -1,14 +1,14 @@
 {
   "name": "@matricom/staxdb",
-  "version": "0.5.07",
+  "version": "0.5.08",
   "description": "A high-performance, zero-copy, embeddable object-graph database for Node.js, built with C++.",
   "main": "index.js",
   "author": "matricom",
   "license": "SEE LICENSE IN LICENSE.md",
-  "homepage": "https://github.com/your-repo/StaxDB",
+  "homepage": "https://github.com/MatricomHQ/StaxDB",
   "repository": {
     "type": "git",
-    "url": "git+https://github.com/your-repo/StaxDB.git"
+    "url": "git+https://github.com/MatricomHQ/StaxDB"
   },
   "keywords": [
     "database",
