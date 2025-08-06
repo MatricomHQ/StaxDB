@@ -5,9 +5,9 @@ name: Publish StaxDB to NPM
 on:
   push:
     branches:
-      - 'release-test' # Trigger on pushes to 'release-test' for iterative testing
+      - 'release-test'
     # tags:
-    #   - 'v*.*.*' # Uncomment this for actual release publishing
+    #   - 'v*.*.*'
 
 jobs:
   build-macos:
@@ -22,35 +22,24 @@ jobs:
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
-
       - name: Set up Node.js
         uses: actions/setup-node@v4
         with:
           node-version: '20'
-
       - name: Build native addon for macOS
         shell: bash
         run: |
           set -e
           cd stax_js
-
-          echo "--- Installing Node.js dependencies ---"
           npm install --ignore-scripts
-
-          echo "--- Compiling native addon for darwin-${{ matrix.arch }} ---"
           if [[ "${{ matrix.arch }}" == "arm64" ]]; then
             npm exec -- node-gyp rebuild --arch=arm64 --target_arch=arm64
           else
             npm exec -- node-gyp rebuild
           fi
-
-          echo "--- Staging pre-built binary ---"
           PLATFORM_DIR="darwin-${{ matrix.arch }}"
-          
           mkdir -p ../prebuilds-staging/${PLATFORM_DIR}
           cp build/Release/staxdb.node ../prebuilds-staging/${PLATFORM_DIR}/staxdb.node
-          echo "Binary staged to ../prebuilds-staging/${PLATFORM_DIR}/staxdb.node"
-
       - name: Upload binary artifact
         uses: actions/upload-artifact@v4
         with:
@@ -60,44 +49,48 @@ jobs:
   build-linux:
     name: Build for Linux (x64) using manylinux
     runs-on: ubuntu-latest
-    # We will NOT use a container: block. We will run docker commands manually.
 
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
 
       - name: Build inside manylinux2014 container
-        # FIX: Run the entire build process inside a Docker container
-        # We mount the workspace and define an output directory
         run: |
-          docker run --rm \
-            -v ${{ github.workspace }}:/work \
-            -w /work \
-            quay.io/pypa/manylinux2014_x86_64 \
-            bash -c '
-              set -e
-              # Use the modern compiler toolchain available in the image
-              source /opt/rh/devtoolset-10/enable
-              
-              # Install NVM and Node.js
-              export NVM_DIR="/root/.nvm"
-              curl -o- https://raw.githubusercontent.com/nvm-sh/nvm/v0.39.7/install.sh | bash
-              source "$NVM_DIR/nvm.sh"
-              nvm install 20
-              nvm use 20
-              
-              # Navigate to the correct directory
-              cd stax_js
-              
-              # Install dependencies and build
-              npm install --ignore-scripts --unsafe-perm
-              npm exec -- node-gyp rebuild
-              
-              # Stage the artifact in a directory the host can access
-              PLATFORM_DIR="linux-x64-glibc"
-              mkdir -p /work/prebuilds-staging/${PLATFORM_DIR}
-              cp build/Release/staxdb.node /work/prebuilds-staging/${PLATFORM_DIR}/staxdb.node
-            '
+          docker run --rm -v ${{ github.workspace }}:/work -w /work quay.io/pypa/manylinux2014_x86_64 \
+          bash -c '
+            set -ex
+
+            # Enable modern C++ compiler from the toolset
+            source /opt/rh/devtoolset-10/enable
+            
+            # Install build dependencies for Node.js itself
+            yum install -y libatomic
+
+            # Install NVM
+            export NVM_DIR="/root/.nvm"
+            curl -o- https://raw.githubusercontent.com/nvm-sh/nvm/v0.39.7/install.sh | bash
+            source "$NVM_DIR/nvm.sh"
+            
+            # --------------------- THE CRITICAL FIX ---------------------
+            # Force NVM to compile Node.js from source using the -s flag.
+            # This ensures the `node` executable is compatible with the container.
+            # ------------------------------------------------------------
+            nvm install 20 -s
+            nvm use 20
+
+            # Verify the node executable is now compatible
+            ldd $(which node)
+
+            # Navigate to the package and build the addon
+            cd stax_js
+            npm install --ignore-scripts --unsafe-perm
+            npm exec -- node-gyp rebuild
+
+            # Stage the final binary
+            PLATFORM_DIR="linux-x64-glibc"
+            mkdir -p /work/prebuilds-staging/${PLATFORM_DIR}
+            cp build/Release/staxdb.node /work/prebuilds-staging/${PLATFORM_DIR}/staxdb.node
+          '
       
       - name: Upload binary artifact
         uses: actions/upload-artifact@v4
@@ -113,25 +106,21 @@ jobs:
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
-
       - name: Set up Node.js
         uses: actions/setup-node@v4
         with:
           node-version: '20'
           registry-url: 'https://registry.npmjs.org'
-
       - name: Download all binary artifacts
         uses: actions/download-artifact@v4
         with:
           path: stax_js/prebuilds
           pattern: prebuilds-*
           merge-multiple: true
-
       - name: Prepare and Publish
         shell: bash
         run: |
           set -e
-          echo "--- Final prebuilds directory structure ---"
           ls -R stax_js/prebuilds
           cd stax_js
           npm install --ignore-scripts
