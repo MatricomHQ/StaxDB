@@ -755,7 +755,7 @@ Napi::Object Initialize(Napi::Env env, Napi::Object exports) {
     GraphWrap::Init(env, exports);
     KVTransactionWrap::Init(env, exports);
     GraphTransactionWrap::Init(env, exports);
-    exports.Set(Napi::String::New(env, "getLastError"), Napi::Function::New(env, GetLastError));
+    exports.Set(Napi::String::New(env, "getLastError"), Napi::Function::New(env, GetLastError, "getLastError"));
     return exports;
 }
 
