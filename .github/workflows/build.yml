@@ -1,72 +1,130 @@
-name: StaxDB C++ CI Build & Test
+name: Publish StaxDB to NPM
 
-# Triggers for the workflow
 on:
   push:
-    branches:
-      - main
-  pull_request:
-    branches:
-      - main
+    tags:
+      - 'v*.*.*' # Trigger on version tags like v1.2.3
 
 jobs:
   build:
-    # A job named 'build'
-    name: Build and Run on ${{ matrix.os }} (${{ matrix.build_type }})
+    name: Build for ${{ matrix.os }} (${{ matrix.arch }})
     runs-on: ${{ matrix.os }}
-
-    # Strategy for the build matrix
     strategy:
-      fail-fast: false
       matrix:
-        os: [ubuntu-latest, macos-latest, windows-latest]
-        build_type: [Release] # Sticking to Release for CI speed, can add Debug if needed
+        include:
+          - os: ubuntu-latest
+            arch: x64
+          - os: windows-latest
+            arch: x64
+          - os: macos-latest # This will run on an x64 runner
+            arch: x64
+          - os: macos-latest # We will cross-compile for arm64 on the x64 runner
+            arch: arm64
 
-    # Steps for the job
     steps:
-      # Step 1: Checkout the repository
       - name: Checkout repository
         uses: actions/checkout@v4
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
         with:
-          submodules: recursive
+          node-version: '20'
 
-      # Step 2: Install build tools on Ubuntu
-      - name: Install build-essential & CMake (Ubuntu)
+      - name: Install C++ build tools (Linux)
         if: runner.os == 'Linux'
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y build-essential cmake
+        run: sudo apt-get update && sudo apt-get install -y build-essential
 
-      # Step 3: Install C++ build tools (Windows)
-      - name: Install MSBuild & CMake (Windows)
+      - name: Install C++ build tools (Windows)
         if: runner.os == 'Windows'
-        # MSBuild is part of the runner image. We just need to ensure CMake is available.
-        # The default shell on Windows is PowerShell, so we need to be explicit.
-        run: choco install cmake --installargs 'ADD_CMAKE_TO_PATH=System'
-        shell: pwsh
+        uses: microsoft/setup-msvc@v1
+        with:
+          msvc-version: 'latest'
+      
+      # For macOS, Xcode Command Line Tools are pre-installed on runners
 
-      # On macOS, build tools (Xcode Command Line Tools) and CMake are generally available.
-
-      # Step 4: Build the C++ project using the Makefile
-      - name: Build C++ Project
-        # Explicitly using bash shell ensures consistency across runners
-        run: make build-cpp
+      - name: Build native addon
+        id: build_addon
         shell: bash
-
-      # Step 5: Run C++ Benchmarks and Tests
-      - name: Run C++ Executable (stax_benchmark)
         run: |
-          if [ "${{ runner.os }}" == "Windows" ]; then
-            ./bin/stax_benchmark.exe
-          else
-            ./bin/stax_benchmark
-          fi
-        shell: bash
+          set -e
+          cd stax_js
 
-      # Step 6: Upload Binaries Artifact
-      - name: Upload Binaries
+          echo "--- Installing Node.js dependencies ---"
+          npm install --ignore-scripts
+
+          echo "--- Compiling native addon for ${{ matrix.os }}-${{ matrix.arch }} ---"
+          if [[ "${{ matrix.os }}" == "macos-latest" && "${{ matrix.arch }}" == "arm64" ]]; then
+            npm exec -- node-gyp rebuild --arch=arm64 --target_arch=arm64
+          else
+            npm exec -- node-gyp rebuild
+          fi
+
+          echo "--- Staging pre-built binary ---"
+          PLATFORM_DIR=${{ runner.os }}-${{ matrix.arch }}
+          if [[ "${{ runner.os }}" == "linux-latest" ]]; then
+              PLATFORM_DIR="linux-x64"
+          elif [[ "${{ runner.os }}" == "windows-latest" ]]; then
+              PLATFORM_DIR="win32-x64"
+          elif [[ "${{ runner.os }}" == "macos-latest" ]]; then
+              PLATFORM_DIR="darwin-${{ matrix.arch }}"
+          fi
+
+          mkdir -p ../prebuilds-staging/${PLATFORM_DIR}
+          cp build/Release/staxdb.node ../prebuilds-staging/${PLATFORM_DIR}/staxdb.node
+          echo "Binary staged to ../prebuilds-staging/${PLATFORM_DIR}/staxdb.node"
+
+      - name: Upload binary artifact
         uses: actions/upload-artifact@v4
         with:
-          name: staxdb-binaries-${{ matrix.os }}-${{ matrix.build_type }}
-          path: bin/ # The output directory is now 'bin'
-          if-no-files-found: error
+          name: prebuilds-${{ matrix.os }}-${{ matrix.arch }}
+          path: prebuilds-staging/
+
+  publish:
+    name: Publish to NPM
+    needs: build
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          registry-url: 'https://registry.npmjs.org'
+
+      - name: Download all binary artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: prebuilds-all/
+      
+      - name: Prepare package for publishing
+        shell: bash
+        run: |
+          set -e
+          echo "--- Consolidating pre-built binaries ---"
+          mkdir -p stax_js/prebuilds
+          # The artifacts are downloaded into subdirectories named after the artifact name
+          # e.g., prebuilds-all/prebuilds-ubuntu-latest-x64/
+          find prebuilds-all -type f -name 'staxdb.node' -exec sh -c ' \
+            DEST_DIR="stax_js/prebuilds/$(basename $(dirname {}))"; \
+            mkdir -p "$DEST_DIR"; \
+            cp "$1" "$DEST_DIR/staxdb.node"; \
+            echo "Copied $1 to $DEST_DIR/staxdb.node"; \
+          ' sh {} \;
+          
+          echo "--- Final prebuilds directory structure ---"
+          ls -R stax_js/prebuilds
+          
+          echo "--- Installing dependencies for publishing ---"
+          cd stax_js
+          npm install --ignore-scripts
+
+
+      - name: Publish to NPM
+        run: |
+          cd stax_js
+          npm publish --access public
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
