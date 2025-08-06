@@ -34,7 +34,8 @@ jobs:
 
       - name: Install C++ build tools (Linux)
         if: runner.os == 'Linux'
-        run: sudo apt-get update && sudo apt-get install -y build-essential cmake
+        # !!! BUG FIX !!! Added libboost-all-dev to install the required Boost libraries for the C++ benchmark.
+        run: sudo apt-get update && sudo apt-get install -y build-essential cmake libboost-all-dev
 
       - name: Install C++ build tools (Windows)
         if: runner.os == 'Windows'
@@ -42,7 +43,8 @@ jobs:
       
       - name: Install C++ build tools (macOS)
         if: runner.os == 'macOS'
-        run: brew install cmake
+        # !!! BUG FIX !!! Added boost to the brew install command.
+        run: brew install cmake boost
       
       - name: Build C++ executables
         shell: bash
