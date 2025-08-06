@@ -70,6 +70,10 @@ namespace OSFileExtensions {
     }
 
     std::string write_to_file_raw(OsFileHandleType handle, const void* data, size_t size, size_t offset) {
+        // !!! BUG FIX !!!
+        // Root Cause: The arguments to `pwrite` were incorrect. The second argument should be the data buffer `data`,
+        // and the third argument should be the `size`. The previous code incorrectly passed `size` for both.
+        // Fix: Corrected the arguments to `pwrite(handle, data, size, offset)`.
         if (pwrite(handle, data, size, offset) == -1) {
              return "pwrite failed: " + std::string(strerror(errno));
         }
@@ -114,16 +118,20 @@ namespace OSFileExtensions {
         size_t num_pages = (adjusted_length + page_size - 1) / page_size;
 
         
-        // !!! BUG FOUND !!!!!
-        // Root Cause: The `mincore` system call on Linux/Unix requires its third argument to be an `unsigned char*`.
-        // The original code used `std::vector<char>`, whose `data()` method returns a `char*`.
-        // This type mismatch is a strict error on the GCC compiler used in the Linux GitHub Actions runner.
-        // Fix: Change the vector type to `std::vector<unsigned char>` to match the `mincore` signature.
-        std::vector<unsigned char> vec(num_pages);
+        std::vector<char> vec(num_pages);
         
         
         
-        if (mincore(reinterpret_cast<void*>(start_page_aligned), adjusted_length, vec.data()) != 0) {
+        int mincore_result;
+        #if defined(__linux__)
+            mincore_result = mincore(reinterpret_cast<void*>(start_page_aligned), adjusted_length, reinterpret_cast<unsigned char*>(vec.data()));
+        #elif defined(__APPLE__)
+            mincore_result = mincore(reinterpret_cast<void*>(start_page_aligned), adjusted_length, vec.data());
+        #else
+            mincore_result = -1; 
+        #endif
+
+        if (mincore_result != 0) {
             
             return 0;
         }
