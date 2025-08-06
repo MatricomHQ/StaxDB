@@ -16,8 +16,6 @@ jobs:
         include:
           - os: ubuntu-latest
             arch: x64
-          - os: windows-latest
-            arch: x64
           - os: macos-latest # This will run on an x64 runner
             arch: x64
           - os: macos-latest # We will cross-compile for arm64 on the x64 runner
@@ -35,14 +33,6 @@ jobs:
       - name: Install C++ build tools (Linux)
         if: runner.os == 'Linux'
         run: sudo apt-get update && sudo apt-get install -y build-essential
-
-      - name: Install C++ build tools (Windows)
-        if: runner.os == 'Windows'
-        # !!! BUG FIX !!! Corrected action for MSVC setup
-        uses: microsoft/setup-msbuild@v1.1 
-        with:
-          msbuild-version: 'latest'
-          # visualstudio-version: 'latest' # Not needed with msbuild-version
       
       # For macOS, Xcode Command Line Tools are pre-installed on runners
 
@@ -65,17 +55,11 @@ jobs:
 
           echo "--- Staging pre-built binary ---"
           PLATFORM_DIR=""
-          if [[ "${{ runner.os }}" == "Linux" ]]; then # Use exact OS name from runner output
+          if [[ "${{ runner.os }}" == "Linux" ]]; then
               PLATFORM_DIR="linux-x64"
-          elif [[ "${{ runner.os }}" == "Windows" ]]; then # Use exact OS name from runner output
-              PLATFORM_DIR="win32-x64"
-          elif [[ "${{ runner.os }}" == "macOS" ]]; then # Use exact OS name from runner output
+          elif [[ "${{ runner.os }}" == "macOS" ]]; then
               PLATFORM_DIR="darwin-${{ matrix.arch }}"
           fi
-          
-          # Adjust for potential inconsistencies in runner.os value vs expected platform naming
-          # The prebuild.js script inside stax_js already handles this robustly,
-          # so we just need a consistent staging dir for artifact upload/download
           
           mkdir -p ../prebuilds-staging/${PLATFORM_DIR}
           cp build/Release/staxdb.node ../prebuilds-staging/${PLATFORM_DIR}/staxdb.node
@@ -113,21 +97,13 @@ jobs:
           set -e
           echo "--- Consolidating pre-built binaries ---"
           mkdir -p stax_js/prebuilds
-          # The artifacts are downloaded into subdirectories named after the artifact name
-          # e.g., prebuilds-all/prebuilds-ubuntu-latest-x64/
           find prebuilds-all -type f -name 'staxdb.node' -exec sh -c ' \
-            # Extract the platform-arch part from the path, e.g., "ubuntu-latest-x64"
-            # and transform it to "linux-x64", "win32-x64", "darwin-x64", "darwin-arm64"
             PLATFORM_OS_ARCH=$(basename $(dirname $(dirname {}))); \
-            
-            # Remove "prebuilds-" prefix if present
             PLATFORM_OS_ARCH=${PLATFORM_OS_ARCH#prebuilds-}; \
 
             DEST_PLATFORM=""; \
             if [[ "$PLATFORM_OS_ARCH" == "ubuntu-latest-x64" ]]; then \
               DEST_PLATFORM="linux-x64"; \
-            elif [[ "$PLATFORM_OS_ARCH" == "windows-latest-x64" ]]; then \
-              DEST_PLATFORM="win32-x64"; \
             elif [[ "$PLATFORM_OS_ARCH" == "macos-latest-x64" ]]; then \
               DEST_PLATFORM="darwin-x64"; \
             elif [[ "$PLATFORM_OS_ARCH" == "macos-latest-arm64" ]]; then \
