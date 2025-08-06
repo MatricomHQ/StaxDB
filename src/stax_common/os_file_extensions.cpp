@@ -114,7 +114,12 @@ namespace OSFileExtensions {
         size_t num_pages = (adjusted_length + page_size - 1) / page_size;
 
         
-        std::vector<char> vec(num_pages);
+        // !!! BUG FOUND !!!!!
+        // Root Cause: The `mincore` system call on Linux/Unix requires its third argument to be an `unsigned char*`.
+        // The original code used `std::vector<char>`, whose `data()` method returns a `char*`.
+        // This type mismatch is a strict error on the GCC compiler used in the Linux GitHub Actions runner.
+        // Fix: Change the vector type to `std::vector<unsigned char>` to match the `mincore` signature.
+        std::vector<unsigned char> vec(num_pages);
         
         
         
