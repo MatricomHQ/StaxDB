@@ -600,7 +600,9 @@ Napi::Object TransactionWrap::NewInstance(Napi::Env env, DatabaseWrap* db_wrap, 
 
 TransactionWrap::TransactionWrap(const Napi::CallbackInfo& info) : Napi::ObjectWrap<TransactionWrap>(info) {}
 TransactionWrap::~TransactionWrap() {
-    if (!is_finished_) { db_instance_->abort(ctx_); }
+    if (!is_finished_ && db_instance_) {
+        db_instance_->abort(ctx_);
+    }
 }
 
 Napi::Value TransactionWrap::Get(const Napi::CallbackInfo& info) {

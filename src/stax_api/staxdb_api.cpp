@@ -682,7 +682,7 @@ StaxPageResult staxdb_resultset_get_page(StaxResultSet result_set, uint32_t page
     static thread_local std::vector<StaxKVPair> page_kv_pairs;
     static thread_local std::vector<char> page_data_buffer;
     
-    StaxPageResult page = {0};
+    StaxPageResult page = {};
     try {
         if (!result_set || page_size == 0 || page_number < 1) return page;
 
@@ -777,7 +777,7 @@ StaxPageResult staxdb_resultset_get_page(StaxResultSet result_set, uint32_t page
         }
     } catch (const std::exception& e) {
         set_last_error(e.what());
-        page = {0}; 
+        page = {}; 
     }
     return page;
 }

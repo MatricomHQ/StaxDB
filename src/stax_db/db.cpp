@@ -757,7 +757,7 @@ void Database::compact(const std::filesystem::path &db_directory, size_t num_thr
     }
 
     uint32_t source_collection_count = source_db->generations_.front()->file_header->collection_array_count.load(std::memory_order_acquire);
-    TxnID compaction_snapshot_id = source_db->get_last_committed_txn_id();
+
 
     for (uint32_t i = 0; i < source_collection_count; ++i)
     {

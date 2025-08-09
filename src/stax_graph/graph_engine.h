@@ -48,8 +48,6 @@ class IndexScanOperator : public QueryOperator
 private:
     Collection *col_;
     const TxnContext &ctx_;
-    uint32_t field_id_;
-    uint32_t value_id_;
     std::unique_ptr<DBCursor> cursor_;
     std::string key_prefix_;
 

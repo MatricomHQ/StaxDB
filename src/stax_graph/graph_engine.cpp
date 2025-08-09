@@ -30,56 +30,6 @@
 static constexpr char OFV_PROPERTY_PREFIX = 'p';
 static constexpr char OFV_RELATIONSHIP_PREFIX = 'r';
 
-static bool roaring_container_contains_internal(const roaring_container_t *c, uint16_t val)
-{
-    if (c->is_bitset)
-    {
-        return (c->container_data.bitset.bitset[val / 64] & (1ULL << (val % 64))) != 0;
-    }
-    else
-    {
-
-        const array_container_t *array_c = &c->container_data.array;
-        int32_t low = 0;
-        int32_t high = array_c->cardinality - 1;
-        while (low <= high)
-        {
-            int32_t mid = low + (high - low) / 2;
-            if (array_c->content[mid] == val)
-                return true;
-            if (array_c->content[mid] < val)
-                low = mid + 1;
-            else
-                high = mid + 1;
-        }
-        return false;
-    }
-}
-
-static bool roaring_bitmap_contains_internal(const roaring_bitmap_t *r, uint32_t val)
-{
-    if (!r)
-        return false;
-    uint16_t high = val >> 16;
-    uint16_t low = val & 0xFFFF;
-    const roaring_array_t *ra = &r->high_low_container;
-
-    int32_t low_idx = 0;
-    int32_t high_idx = ra->num_containers - 1;
-    while (low_idx <= high_idx)
-    {
-        int32_t mid_idx = low_idx + (high_idx - low_idx) / 2;
-        if (ra->keys[mid_idx] == high)
-        {
-            return roaring_container_contains_internal(ra->containers[mid_idx], low);
-        }
-        if (ra->keys[mid_idx] < high)
-            low_idx = mid_idx + 1;
-        else
-            high_idx = mid_idx - 1;
-    }
-    return false;
-}
 
 uint32_t hash_fnv1a_32(std::string_view s)
 {
@@ -102,7 +52,7 @@ bool QueryPipeline::next(uint32_t &out_id)
 }
 
 IndexScanOperator::IndexScanOperator(Collection *col, const TxnContext &ctx, uint32_t field_id, uint32_t value_id)
-    : col_(col), ctx_(ctx), field_id_(field_id), value_id_(value_id)
+    : col_(col), ctx_(ctx)
 {
     char prefix_buf[GraphTransaction::BINARY_U32_SIZE * 2];
     size_t key_prefix_len = to_binary_key_buf(field_id, prefix_buf, sizeof(prefix_buf));
