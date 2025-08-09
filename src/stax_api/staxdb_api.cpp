@@ -19,18 +19,6 @@
 #include <set>
 #include <cstdio> // For printf
 
-static void hex_dump_slice(const char* prefix, StaxSlice s) {
-    printf("%s [size=%zu]: ", prefix, s.len);
-    if (!s.data) {
-        printf(" (null)\n");
-        return;
-    }
-    for (size_t i = 0; i < s.len; ++i) {
-        printf("%02hhx ", static_cast<unsigned char>(s.data[i]));
-    }
-    printf("\n");
-}
-
 
 struct CompiledQueryStep {
     StaxGraphQueryOpType op_type;
@@ -529,13 +517,6 @@ uint32_t staxdb_graph_compile_plan(StaxGraph graph, const StaxGraphQueryStep* st
 
 StaxResultSet staxdb_graph_execute_plan(StaxGraph graph, uint32_t plan_id, const StaxSlice* params, size_t num_params) {
     clear_last_error();
-    printf("\n--- [C-API] staxdb_graph_execute_plan ---\n");
-    printf("Plan ID: %u, Num Params: %zu\n", plan_id, num_params);
-    for (size_t i = 0; i < num_params; ++i) {
-        char prefix[32];
-        snprintf(prefix, sizeof(prefix), "  Param %zu", i);
-        hex_dump_slice(prefix, params[i]);
-    }
 
     if (!graph || !graph->db_instance) { set_last_error("Graph handle is invalid."); return NULL; }
     if (plan_id >= graph->compiled_plans.size()) { set_last_error("Invalid query plan ID."); return NULL; }

@@ -23,19 +23,6 @@ static constexpr char OFV_PROPERTY_PREFIX = 'p';
 static constexpr char OFV_RELATIONSHIP_PREFIX = 'r';
 static constexpr char KEY_SEPARATOR = '\0';
 
-static void hex_dump_sv(const char* prefix, std::string_view sv) {
-    printf("%s [size=%zu]: ", prefix, sv.size());
-    for (size_t i = 0; i < sv.size(); ++i) {
-        printf("%02hhx ", static_cast<unsigned char>(sv[i]));
-    }
-    printf(" | '");
-    for (size_t i = 0; i < sv.size(); ++i) {
-        printf("%c", isprint(sv[i]) ? sv[i] : '.');
-    }
-    printf("'\n");
-}
-
-
 QueryPipeline::QueryPipeline(std::unique_ptr<QueryOperator> source) : source_(std::move(source)) {}
 
 bool QueryPipeline::next(uint32_t &out_id)
@@ -317,11 +304,6 @@ void GraphReader::get_objects_by_property_into_roaring(std::string_view field_na
 
 void GraphReader::get_objects_by_property_range_into_roaring(std::string_view field_name, uint64_t start_numeric_val, uint64_t end_numeric_val, roaring_bitmap_t* target_bitmap) {
     if (!target_bitmap) return;
-    
-    printf("\n--- [GraphReader] get_objects_by_property_range_into_roaring ---\n");
-    printf("Field: '%.*s'\n", (int)field_name.length(), field_name.data());
-    printf("Start val (u64): %llu\n", (unsigned long long)start_numeric_val);
-    printf("End val (u64): %llu\n", (unsigned long long)end_numeric_val);
 
     char start_val_buf[GraphTransaction::BINARY_U64_SIZE];
     to_binary_key_buf(start_numeric_val, start_val_buf, sizeof(start_val_buf));
@@ -330,14 +312,10 @@ void GraphReader::get_objects_by_property_range_into_roaring(std::string_view fi
     char end_val_buf[GraphTransaction::BINARY_U64_SIZE];
     to_binary_key_buf(end_numeric_val, end_val_buf, sizeof(end_val_buf));
     std::string end_key_exclusive = std::string(field_name) + KEY_SEPARATOR + std::string(end_val_buf, sizeof(end_val_buf)) + KEY_SEPARATOR + '\xff';
-    
-    hex_dump_sv("  Start Key", start_key);
-    hex_dump_sv("  End Key", end_key_exclusive);
 
     for (auto cursor = fvo_col_->seek_raw(ctx_, start_key, end_key_exclusive); cursor->is_valid(); cursor->next()) {
         std::string_view key_view = cursor->key();
         
-        // Robust parsing: field_name + sep + value + sep + id
         size_t expected_id_offset = field_name.length() + 1 + GraphTransaction::BINARY_U64_SIZE + 1;
         if (key_view.length() == expected_id_offset + GraphTransaction::BINARY_U32_SIZE) {
              std::string_view id_part = key_view.substr(expected_id_offset);

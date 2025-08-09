@@ -14,19 +14,6 @@
 #include "stax_common/geohash.hpp"
 #include "stax_common/binary_utils.h"
 
-// Helper function for hex dumping
-static void hex_dump(const char* prefix, const char* data, size_t size) {
-    printf("%s [size=%zu]: ", prefix, size);
-    if (!data) {
-        printf(" (null)\n");
-        return;
-    }
-    for (size_t i = 0; i < size; ++i) {
-        printf("%02hhx ", static_cast<unsigned char>(data[i]));
-    }
-    printf("\n");
-}
-
 // C++ implementation of geohash encoding
 static uint64_t encode_geohash(double lat, double lon, int precision = 64) {
     uint64_t geohash = 0;
@@ -439,9 +426,6 @@ Napi::Value GraphWrap::ExecuteQuery(const Napi::CallbackInfo& info) {
     uint32_t plan_id = info[0].As<Napi::Number>().Uint32Value();
     Napi::Array plan_js = info[1].As<Napi::Array>();
     
-    printf("\n--- [N-API] GraphWrap::ExecuteQuery ---\n");
-    printf("Plan ID: %u\n", plan_id);
-
     std::vector<std::string> param_storage;
     std::vector<char> binary_param_buffer;
     param_storage.reserve(plan_js.Length() * 2);
@@ -514,12 +498,10 @@ Napi::Value GraphWrap::ExecuteQuery(const Napi::CallbackInfo& info) {
                 }
 
                 to_binary_key_buf(gte, binary_buf_ptr, 8);
-                hex_dump("  gte_bytes", binary_buf_ptr, 8);
                 c_params.push_back({binary_buf_ptr, 8});
                 binary_buf_ptr += 8;
 
                 to_binary_key_buf(lte, binary_buf_ptr, 8);
-                hex_dump("  lte_bytes", binary_buf_ptr, 8);
                 c_params.push_back({binary_buf_ptr, 8});
                 binary_buf_ptr += 8;
             } else if (val.IsString()) {
@@ -541,7 +523,6 @@ Napi::Value GraphWrap::ExecuteQuery(const Napi::CallbackInfo& info) {
     
     StaxResultSet rs_handle = staxdb_graph_execute_plan(graph_handle_, plan_id, c_params.data(), c_params.size());
     if (!rs_handle) {
-        printf("[N-API] ExecuteQuery returned NULL result set.\n");
         return env.Null();
     }
     if (rs_handle->result_type == GRAPH_ID_RESULT) {
