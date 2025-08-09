@@ -620,7 +620,7 @@ void Database::open_generation(const std::filesystem::path &db_directory, const 
         }
     }
 
-    gen->internal_node_allocator = std::make_unique<NodeAllocator>(this, gen->mmap_base);
+    gen->internal_node_allocator = std::make_unique<NodeAllocator>(gen->file_header, gen->mmap_base);
 
     uint32_t active_collection_count = gen->file_header->collection_array_count.load(std::memory_order_acquire);
     uint32_t array_capacity = gen->file_header->collection_array_capacity;
@@ -631,7 +631,7 @@ void Database::open_generation(const std::filesystem::path &db_directory, const 
     for (uint32_t i = 0; i < active_collection_count; ++i)
     {
         gen->owned_record_allocators.emplace_back(
-            std::make_unique<CollectionRecordAllocator>(this, gen->mmap_base, num_threads_));
+            std::make_unique<CollectionRecordAllocator>(gen->file_header, gen->mmap_base, num_threads_));
         gen->owned_collections.emplace_back(
             std::make_unique<Collection>(this, gen.get(), i, *gen->owned_record_allocators[i]));
     }
@@ -689,43 +689,10 @@ uint32_t Database::get_collection(std::string_view name)
             new_entry.live_record_bytes.store(0, std::memory_order_relaxed);
             new_entry.object_id_counter.store(1, std::memory_order_relaxed);
 
-            active_gen.owned_record_allocators[new_index] = std::make_unique<CollectionRecordAllocator>(this, active_gen.mmap_base, num_threads_);
+            active_gen.owned_record_allocators[new_index] = std::make_unique<CollectionRecordAllocator>(active_gen.file_header, active_gen.mmap_base, num_threads_);
             active_gen.owned_collections[new_index] = std::make_unique<Collection>(this, &active_gen, new_index, *active_gen.owned_record_allocators[new_index]);
 
             return new_index;
-        }
-    }
-}
-
-uint64_t Database::allocate_data_chunk(size_t size_bytes, size_t alignment)
-{
-    if (generations_.empty())
-    {
-        throw std::runtime_error("Cannot allocate chunk: no active database generation.");
-    }
-    DbGeneration &active_gen = *generations_.front();
-
-    if ((alignment & (alignment - 1)) != 0)
-    {
-        throw std::invalid_argument("Alignment must be a power of two.");
-    }
-
-    const uint64_t alignment_mask = alignment - 1;
-    uint64_t current_offset = active_gen.file_header->global_alloc_offset.load(std::memory_order_acquire);
-
-    while (true)
-    {
-        uint64_t aligned_offset = (current_offset + alignment_mask) & ~alignment_mask;
-        uint64_t next_offset = aligned_offset + size_bytes;
-
-        if (next_offset > active_gen.mmap_size)
-        {
-            throw std::runtime_error("Database out of space during aligned chunk allocation.");
-        }
-
-        if (active_gen.file_header->global_alloc_offset.compare_exchange_weak(current_offset, next_offset, std::memory_order_release, std::memory_order_acquire))
-        {
-            return aligned_offset;
         }
     }
 }
@@ -1009,8 +976,39 @@ std::unique_ptr<DBCursor> Collection::seek_raw(const TxnContext &ctx, std::strin
     return std::make_unique<DBCursor>(parent_db_, ctx, &this->get_critbit_tree(), start_key, end_key, true);
 }
 
-CollectionRecordAllocator::CollectionRecordAllocator(Database *parent_db, uint8_t *mmap_base_addr, size_t num_threads_configured_for_db) noexcept
-    : parent_db_(parent_db), mmap_base_addr_(mmap_base_addr), num_threads_configured_for_db_(num_threads_configured_for_db)
+uint64_t CollectionRecordAllocator::allocate_data_chunk(size_t size_bytes, size_t alignment) {
+    if (!file_header_) {
+        throw std::runtime_error("Cannot allocate chunk: file header is null.");
+    }
+
+    if ((alignment & (alignment - 1)) != 0)
+    {
+        throw std::invalid_argument("Alignment must be a power of two.");
+    }
+
+    const uint64_t alignment_mask = alignment - 1;
+    uint64_t current_offset = file_header_->global_alloc_offset.load(std::memory_order_acquire);
+
+    while (true)
+    {
+        uint64_t aligned_offset = (current_offset + alignment_mask) & ~alignment_mask;
+        uint64_t next_offset = aligned_offset + size_bytes;
+
+        if (next_offset > DB_MAX_VIRTUAL_SIZE)
+        {
+            throw std::runtime_error("Database out of space during aligned chunk allocation.");
+        }
+
+        if (file_header_->global_alloc_offset.compare_exchange_weak(current_offset, next_offset, std::memory_order_release, std::memory_order_acquire))
+        {
+            return aligned_offset;
+        }
+    }
+}
+
+
+CollectionRecordAllocator::CollectionRecordAllocator(FileHeader* file_header, uint8_t* mmap_base_addr, size_t num_threads_configured_for_db) noexcept
+    : file_header_(file_header), mmap_base_addr_(mmap_base_addr), num_threads_configured_for_db_(num_threads_configured_for_db)
 {
     for (size_t i = 0; i < MAX_CONCURRENT_THREADS; ++i)
     {
@@ -1030,7 +1028,7 @@ void CollectionRecordAllocator::allocate_new_tlab(size_t thread_id, size_t reque
     size_t chunk_size = std::max(static_cast<size_t>(RECORD_ALLOCATOR_CHUNK_SIZE), requested_record_size);
     chunk_size = (chunk_size + OFFSET_GRANULARITY - 1) & ~(static_cast<size_t>(OFFSET_GRANULARITY - 1));
 
-    uint64_t chunk_start_offset = parent_db_->allocate_data_chunk(chunk_size);
+    uint64_t chunk_start_offset = allocate_data_chunk(chunk_size);
 
     ThreadLocalBuffer &tlab = thread_tlabs_[thread_id];
     tlab.start_ptr = mmap_base_addr_ + chunk_start_offset;

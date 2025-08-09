@@ -11,6 +11,7 @@
 
 #include "stax_common/constants.h"
 #include "stax_common/common_types.hpp"
+#include "stax_db/arena_structs.h"
 
 class Database;
 
@@ -25,7 +26,7 @@ class Database;
 class NodeAllocator
 {
 private:
-    Database *parent_db_ = nullptr;
+    FileHeader* file_header_ = nullptr;
     uint8_t *mmap_base_addr_ = nullptr;
 
     static constexpr size_t NODES_PER_CHUNK = 512;
@@ -46,12 +47,14 @@ private:
     std::array<ThreadLocalChunk, MAX_CONCURRENT_THREADS> thread_chunks_;
 
     void request_new_chunk(size_t thread_id);
+    uint64_t allocate_data_chunk(size_t size_bytes, size_t alignment = 8);
+
 
 public:
     static thread_local std::vector<uint64_t> thread_local_free_list;
     static constexpr uint64_t NIL_INDEX = std::numeric_limits<uint64_t>::max();
 
-    NodeAllocator(Database *parent_db, uint8_t *mmap_base_addr);
+    NodeAllocator(FileHeader* file_header, uint8_t* mmap_base_addr);
 
     uint64_t allocate(size_t thread_id);
     void deallocate(uint64_t node_handle);

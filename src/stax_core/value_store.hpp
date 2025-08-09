@@ -12,6 +12,7 @@
 #include <vector>  
 #include "stax_common/constants.h"
 #include "stax_common/common_types.hpp"
+#include "stax_db/arena_structs.h"
 
 
 class Database;
@@ -48,7 +49,7 @@ class CollectionRecordAllocator
 private:
     friend class StaxTree;
     
-    Database* parent_db_ = nullptr;
+    FileHeader* file_header_ = nullptr;
     uint8_t* mmap_base_addr_ = nullptr;
     
     struct ThreadLocalBuffer
@@ -67,6 +68,7 @@ private:
     static_assert(FIXED_HEADER_SIZE % OFFSET_GRANULARITY == 0, "Fixed header size must be a multiple of granularity for alignment.");
     
     void allocate_new_tlab(size_t thread_id, size_t requested_record_size);
+    uint64_t allocate_data_chunk(size_t size_bytes, size_t alignment = 8);
 
 public:
     static constexpr uint32_t NIL_RECORD_OFFSET = 0;
@@ -74,7 +76,7 @@ public:
     static constexpr uint32_t MAX_KEY_VALUE_LENGTH = std::numeric_limits<uint32_t>::max();
     static constexpr uint8_t FLAG_DELETED = 0x01;
     
-    CollectionRecordAllocator(Database* parent_db, uint8_t* mmap_base_addr, size_t num_threads_configured_for_db) noexcept;
+    CollectionRecordAllocator(FileHeader* file_header, uint8_t* mmap_base_addr, size_t num_threads_configured_for_db) noexcept;
 
     static size_t get_allocated_record_size(size_t key_len, size_t value_len) noexcept {
         const size_t record_payload_size = key_len + value_len;

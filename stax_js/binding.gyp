@@ -10,6 +10,7 @@
         "../src/stax_common/os_file_extensions.cpp",
         "../src/stax_common/roaring.cpp",
         "../src/stax_core/stax_tree.cpp",
+        "../src/stax_core/node_allocator.cpp",
         "../src/stax_db/db.cpp",
         "../src/stax_db/query.cpp",
         "../src/stax_db/statistics.cpp",

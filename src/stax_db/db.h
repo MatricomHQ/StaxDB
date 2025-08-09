@@ -145,8 +145,6 @@ public:
     TxnID get_last_committed_txn_id() const;
     TxnID get_next_txn_id();
 
-    uint64_t allocate_data_chunk(size_t size_bytes, size_t alignment = 8);
-
 public:
     Database(const std::filesystem::path &base_dir, size_t num_threads, DurabilityLevel level);
 

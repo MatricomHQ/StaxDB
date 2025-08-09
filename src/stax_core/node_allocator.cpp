@@ -3,8 +3,8 @@
 
 thread_local std::vector<uint64_t> NodeAllocator::thread_local_free_list;
 
-NodeAllocator::NodeAllocator(Database *parent_db, uint8_t *mmap_base_addr)
-    : parent_db_(parent_db), mmap_base_addr_(mmap_base_addr)
+NodeAllocator::NodeAllocator(FileHeader* file_header, uint8_t* mmap_base_addr)
+    : file_header_(file_header), mmap_base_addr_(mmap_base_addr)
 {
     for (size_t i = 0; i < MAX_CONCURRENT_THREADS; ++i)
     {
@@ -13,6 +13,39 @@ NodeAllocator::NodeAllocator(Database *parent_db, uint8_t *mmap_base_addr)
     }
 }
 
+uint64_t NodeAllocator::allocate_data_chunk(size_t size_bytes, size_t alignment)
+{
+    if (!file_header_) {
+        throw std::runtime_error("Cannot allocate chunk: file header is null.");
+    }
+
+    if ((alignment & (alignment - 1)) != 0)
+    {
+        throw std::invalid_argument("Alignment must be a power of two.");
+    }
+
+    const uint64_t alignment_mask = alignment - 1;
+    uint64_t current_offset = file_header_->global_alloc_offset.load(std::memory_order_acquire);
+
+    while (true)
+    {
+        uint64_t aligned_offset = (current_offset + alignment_mask) & ~alignment_mask;
+        uint64_t next_offset = aligned_offset + size_bytes;
+
+        // Note: We don't have access to mmap_size here. A check against DB_MAX_VIRTUAL_SIZE is a safeguard.
+        if (next_offset > DB_MAX_VIRTUAL_SIZE)
+        {
+            throw std::runtime_error("Database out of space during aligned chunk allocation.");
+        }
+
+        if (file_header_->global_alloc_offset.compare_exchange_weak(current_offset, next_offset, std::memory_order_release, std::memory_order_acquire))
+        {
+            return aligned_offset;
+        }
+    }
+}
+
+
 void NodeAllocator::request_new_chunk(size_t thread_id)
 {
     if (thread_id >= MAX_CONCURRENT_THREADS)
@@ -20,7 +53,7 @@ void NodeAllocator::request_new_chunk(size_t thread_id)
         throw std::out_of_range("Thread ID exceeds max threads in NodeAllocator.");
     }
 
-    uint64_t chunk_start_offset = parent_db_->allocate_data_chunk(CHUNK_ALIGNMENT, CHUNK_ALIGNMENT);
+    uint64_t chunk_start_offset = allocate_data_chunk(CHUNK_ALIGNMENT, CHUNK_ALIGNMENT);
 
     ThreadLocalChunk &chunk = thread_chunks_[thread_id];
     chunk.chunk_base_offset_from_mmap = chunk_start_offset;
