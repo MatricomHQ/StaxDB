@@ -51,8 +51,7 @@ class StaxTree
 private:
     friend class DBCursor;
 
-    
-    NodeAllocator<StaxTreeNode> &internal_node_allocator_;
+    NodeAllocator &internal_node_allocator_;
     CollectionRecordAllocator &record_allocator_;
     std::atomic<uint64_t> &root_ptr_;
 
@@ -205,8 +204,7 @@ private:
     void find_leaf_nodes_recursive(uint64_t current_ptr, std::string_view prefix, std::vector<uint64_t> &leaf_nodes) const;
 
 public:
-    
-    StaxTree(NodeAllocator<StaxTreeNode> &internal_alloc,
+    StaxTree(NodeAllocator &internal_alloc,
              CollectionRecordAllocator &record_alloc,
              std::atomic<uint64_t> &root_ref);
 

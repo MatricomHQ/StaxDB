@@ -16,6 +16,7 @@
 #include <unordered_map>
 
 #include "stax_common/roaring.h"
+#include "stax_core/node_allocator.hpp"
 
 DbGeneration::~DbGeneration()
 {
@@ -190,15 +191,14 @@ DBCursor::DBCursor(Database *db, const TxnContext &ctx, StaxTree *tree, std::str
         end_key_view_ = end_key_buffer_;
     }
     tree_->seek(start_key, path_stack_);
-    
-    
+
     validate_current_leaf();
 
-    
-    while (!is_valid_ && !path_stack_.empty()) {
+    while (!is_valid_ && !path_stack_.empty())
+    {
         next();
     }
-    
+
     if (is_valid_)
     {
         if (has_end_key_ && key() >= end_key_view_)
@@ -307,22 +307,24 @@ void DBCursor::next()
 
 void DBCursor::validate_current_leaf()
 {
-    if (path_stack_.empty()) {
+    if (path_stack_.empty())
+    {
         is_valid_ = false;
         return;
     }
     uint64_t current_pointer = path_stack_.top();
 
-    if (!(current_pointer & POINTER_TAG_BIT)) {
+    if (!(current_pointer & POINTER_TAG_BIT))
+    {
         is_valid_ = false;
         return;
     }
 
     uint32_t record_relative_offset = current_pointer & POINTER_INDEX_MASK;
-    
-    if (raw_mode_) {
-        
-        
+
+    if (raw_mode_)
+    {
+
         current_record_data_ = tree_->record_allocator_.get_record_data(record_relative_offset);
         current_key_ptr_ = current_record_data_.key_ptr;
         current_key_len_ = current_record_data_.key_len;
@@ -330,11 +332,12 @@ void DBCursor::validate_current_leaf()
         return;
     }
 
-    
     uint32_t version_relative_offset_for_mvcc = record_relative_offset;
-    while (version_relative_offset_for_mvcc != CollectionRecordAllocator::NIL_RECORD_OFFSET) {
+    while (version_relative_offset_for_mvcc != CollectionRecordAllocator::NIL_RECORD_OFFSET)
+    {
         RecordData record = tree_->record_allocator_.get_record_data(version_relative_offset_for_mvcc);
-        if (record.txn_id <= ctx_.read_snapshot_id) {
+        if (record.txn_id <= ctx_.read_snapshot_id)
+        {
             current_record_data_ = record;
             current_key_ptr_ = record.key_ptr;
             current_key_len_ = record.key_len;
@@ -408,7 +411,6 @@ Database::Database(const std::filesystem::path &base_dir, size_t num_threads, Du
       durability_level_(level)
 {
 }
-
 
 Database::~Database()
 {
@@ -528,7 +530,6 @@ void Database::drop(const std::filesystem::path& db_directory) {
     }
 }
 
-
 void Database::open_generation(const std::filesystem::path &db_directory, const std::filesystem::path &file_name, bool is_new)
 {
     auto gen = std::make_unique<DbGeneration>();
@@ -619,7 +620,7 @@ void Database::open_generation(const std::filesystem::path &db_directory, const 
         }
     }
 
-    gen->internal_node_allocator = std::make_unique<NodeAllocator<StaxTreeNode>>(this, gen->mmap_base);
+    gen->internal_node_allocator = std::make_unique<NodeAllocator>(this, gen->mmap_base);
 
     uint32_t active_collection_count = gen->file_header->collection_array_count.load(std::memory_order_acquire);
     uint32_t array_capacity = gen->file_header->collection_array_capacity;
@@ -696,7 +697,7 @@ uint32_t Database::get_collection(std::string_view name)
     }
 }
 
-uint64_t Database::allocate_data_chunk(size_t size_bytes)
+uint64_t Database::allocate_data_chunk(size_t size_bytes, size_t alignment)
 {
     if (generations_.empty())
     {
@@ -704,14 +705,29 @@ uint64_t Database::allocate_data_chunk(size_t size_bytes)
     }
     DbGeneration &active_gen = *generations_.front();
 
-    uint64_t chunk_start_offset = active_gen.file_header->global_alloc_offset.fetch_add(size_bytes, std::memory_order_acq_rel);
-
-    if (chunk_start_offset + size_bytes > active_gen.mmap_size)
+    if ((alignment & (alignment - 1)) != 0)
     {
-        active_gen.file_header->global_alloc_offset.fetch_sub(size_bytes, std::memory_order_relaxed);
-        throw std::runtime_error("Database out of space during chunk allocation.");
+        throw std::invalid_argument("Alignment must be a power of two.");
     }
-    return chunk_start_offset;
+
+    const uint64_t alignment_mask = alignment - 1;
+    uint64_t current_offset = active_gen.file_header->global_alloc_offset.load(std::memory_order_acquire);
+
+    while (true)
+    {
+        uint64_t aligned_offset = (current_offset + alignment_mask) & ~alignment_mask;
+        uint64_t next_offset = aligned_offset + size_bytes;
+
+        if (next_offset > active_gen.mmap_size)
+        {
+            throw std::runtime_error("Database out of space during aligned chunk allocation.");
+        }
+
+        if (active_gen.file_header->global_alloc_offset.compare_exchange_weak(current_offset, next_offset, std::memory_order_release, std::memory_order_acquire))
+        {
+            return aligned_offset;
+        }
+    }
 }
 
 Collection &Database::get_collection_by_idx(uint32_t collection_idx)
@@ -993,87 +1009,6 @@ std::unique_ptr<DBCursor> Collection::seek_raw(const TxnContext &ctx, std::strin
     return std::make_unique<DBCursor>(parent_db_, ctx, &this->get_critbit_tree(), start_key, end_key, true);
 }
 
-
-template <typename T>
-NodeAllocator<T>::NodeAllocator(Database *parent_db, uint8_t *mmap_base_addr)
-    : parent_db_(parent_db), mmap_base_addr_(mmap_base_addr)
-{
-    for (size_t i = 0; i < MAX_CONCURRENT_THREADS; ++i)
-    {
-        thread_chunks_[i].start_ptr = nullptr;
-        thread_chunks_[i].size_bytes = 0;
-        thread_chunks_[i].current_offset.store(0, std::memory_order_relaxed);
-    }
-}
-
-template <typename T>
-void NodeAllocator<T>::request_new_chunk(size_t thread_id)
-{
-    if (thread_id >= MAX_CONCURRENT_THREADS)
-    {
-        throw std::out_of_range("Thread ID exceeds max threads in NodeAllocator.");
-    }
-
-    uint64_t chunk_start_offset = parent_db_->allocate_data_chunk(NODE_ALLOCATOR_CHUNK_SIZE);
-
-    ThreadLocalChunk &chunk = thread_chunks_[thread_id];
-    chunk.start_ptr = mmap_base_addr_ + chunk_start_offset;
-    chunk.size_bytes = NODE_ALLOCATOR_CHUNK_SIZE;
-    chunk.current_offset.store(0, std::memory_order_relaxed);
-}
-
-template <typename T>
-uint64_t NodeAllocator<T>::allocate(size_t thread_id)
-{
-    if (!thread_local_free_list.empty())
-    {
-        uint64_t recycled_byte_offset = thread_local_free_list.back();
-        thread_local_free_list.pop_back();
-        return recycled_byte_offset;
-    }
-
-    if (thread_id >= MAX_CONCURRENT_THREADS)
-    {
-        throw std::out_of_range("Thread ID exceeds configured number of threads for NodeAllocator.");
-    }
-
-    const size_t node_size = sizeof(StaxTreeNode);
-    const size_t aligned_node_size = NodeAllocator<T>::align_up(node_size, 8);
-
-    for (int i = 0; i < 2; ++i)
-    {
-        ThreadLocalChunk &chunk = thread_chunks_[thread_id];
-        if (chunk.start_ptr && (chunk.current_offset.load(std::memory_order_relaxed) + aligned_node_size <= chunk.size_bytes))
-        {
-            uint64_t allocated_offset_in_chunk = chunk.current_offset.fetch_add(aligned_node_size, std::memory_order_relaxed);
-            uint64_t absolute_node_addr = reinterpret_cast<uint64_t>(chunk.start_ptr + allocated_offset_in_chunk);
-            uint64_t byte_offset_from_mmap_base = absolute_node_addr - reinterpret_cast<uint64_t>(mmap_base_addr_);
-            return byte_offset_from_mmap_base;
-        }
-        request_new_chunk(thread_id);
-    }
-    throw std::runtime_error("NodeAllocator: Persistent out of space after attempting to get a new chunk.");
-}
-
-template <typename T>
-void NodeAllocator<T>::deallocate(uint64_t node_byte_offset)
-{
-    if (node_byte_offset == NIL_INDEX)
-        return;
-    thread_local_free_list.push_back(node_byte_offset);
-}
-
-template <typename T>
-size_t NodeAllocator<T>::get_total_occupied_size() const
-{
-    size_t total = 0;
-    for (size_t i = 0; i < MAX_CONCURRENT_THREADS; ++i)
-    {
-        total += thread_chunks_[i].current_offset.load(std::memory_order_relaxed);
-    }
-    return total;
-}
-
 CollectionRecordAllocator::CollectionRecordAllocator(Database *parent_db, uint8_t *mmap_base_addr, size_t num_threads_configured_for_db) noexcept
     : parent_db_(parent_db), mmap_base_addr_(mmap_base_addr), num_threads_configured_for_db_(num_threads_configured_for_db)
 {
@@ -1135,5 +1070,3 @@ void *CollectionRecordAllocator::reserve_record_space(size_t thread_id, size_t k
 
     throw std::runtime_error("CollectionRecordAllocator: Persistent out of space after attempting to get a new chunk.");
 }
-
-template class NodeAllocator<StaxTreeNode>;

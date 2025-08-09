@@ -9,19 +9,6 @@
 
 #pragma pack(push, 8)
 
-struct StaxTreeNode
-{
-
-    uint16_t bit_index;
-
-    uint8_t padding[6];
-
-    std::atomic<uint64_t> left_child_ptr;
-    std::atomic<uint64_t> right_child_ptr;
-};
-static_assert(sizeof(StaxTreeNode) == 24, "StaxTreeNode must be 24 bytes for cache alignment.");
-static_assert(alignof(StaxTreeNode) == 8, "StaxTreeNode must be 8-byte aligned.");
-
 struct CollectionEntry
 {
     std::atomic<uint64_t> root_node_ptr;

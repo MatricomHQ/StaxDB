@@ -1,6 +1,6 @@
 #include "stax_core/stax_tree.hpp"
 
-StaxTree::StaxTree(NodeAllocator<StaxTreeNode> &internal_alloc,
+StaxTree::StaxTree(NodeAllocator &internal_alloc,
                    CollectionRecordAllocator &record_alloc,
                    std::atomic<uint64_t> &root_ref)
     : internal_node_allocator_(internal_alloc),
@@ -212,7 +212,6 @@ retry_operation:
         goto retry_operation;
     }
 }
-
 
 void StaxTree::insert_batch(const TxnContext &ctx, const CoreKVPair *kv_pairs, size_t num_kvs, TransactionBatch &batch)
 {

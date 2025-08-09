@@ -12,19 +12,19 @@
 #include <atomic>
 
 #include "stax_common/os_platform_tools.h"
-#include "stax_db/arena_structs.h" 
-#include "stax_core/node_allocator.hpp" 
+#include "stax_db/arena_structs.h"
 #include "stax_core/value_store.hpp"
 #include "stax_core/stax_tree.hpp"
 #include "stax_common/common_types.hpp"
 #include "stax_common/spin_locks.h"
 #include "stax_common/db_interfaces.h"
 #include "stax_tx/transaction.h"
-#include "stax_common/constants.h" 
+#include "stax_common/constants.h"
 
 class Database;
 class DBCursor;
 class Collection;
+class NodeAllocator;
 
 namespace StaxStats
 {
@@ -56,12 +56,11 @@ struct DbGeneration
     uint8_t *mmap_base = nullptr;
     size_t mmap_size = 0;
     OsFileHandleType file_handle = INVALID_OS_FILE_HANDLE;
-    OsFileHandleType lock_file_handle = INVALID_OS_FILE_HANDLE; 
+    OsFileHandleType lock_file_handle = INVALID_OS_FILE_HANDLE;
     FileHeader *file_header = nullptr;
 
-    
-    std::unique_ptr<NodeAllocator<StaxTreeNode>> internal_node_allocator; 
-    
+    std::unique_ptr<NodeAllocator> internal_node_allocator;
+
     std::vector<std::unique_ptr<Collection>> owned_collections;
     std::vector<std::unique_ptr<CollectionRecordAllocator>> owned_record_allocators;
 
@@ -74,7 +73,7 @@ class Collection
 {
 public:
     uint32_t get_id() const { return collection_idx_; }
-    StaxTree &get_critbit_tree() { return *critbit_tree_; } 
+    StaxTree &get_critbit_tree() { return *critbit_tree_; }
     const StaxTree &get_critbit_tree() const { return *critbit_tree_; }
 
     Collection(Database *parent_db, DbGeneration *owning_generation, uint32_t collection_idx, CollectionRecordAllocator &record_allocator);
@@ -141,13 +140,12 @@ public:
     static void compact(const std::filesystem::path &db_directory, size_t num_threads, bool flatten = false);
 
     StaxStats::DatabaseStatisticsCollector get_statistics_collector();
-    
+
     void update_last_committed_txn_id(TxnID id);
     TxnID get_last_committed_txn_id() const;
     TxnID get_next_txn_id();
 
-    
-    uint64_t allocate_data_chunk(size_t size_bytes);
+    uint64_t allocate_data_chunk(size_t size_bytes, size_t alignment = 8);
 
 public:
     Database(const std::filesystem::path &base_dir, size_t num_threads, DurabilityLevel level);
@@ -161,7 +159,7 @@ private:
     friend class StaxStats::DatabaseStatisticsCollector;
     friend class MergedCursorImpl;
     friend class DBCursor;
-    friend class NodeAllocator<StaxTreeNode>; 
+    friend class NodeAllocator;
     friend class CollectionRecordAllocator;
 
     static uint64_t hash_name(std::string_view name);

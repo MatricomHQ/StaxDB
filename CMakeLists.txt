@@ -85,6 +85,7 @@ add_library(stax_db STATIC
     src/stax_db/query.cpp
     src/stax_core/stax_tree.cpp
     src/stax_db/statistics.cpp
+    src/stax_core/node_allocator.cpp
 )
 target_link_libraries(stax_db PUBLIC stax_tx stax_common)
 
