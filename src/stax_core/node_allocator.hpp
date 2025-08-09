@@ -40,9 +40,7 @@ private:
 
     struct ThreadLocalChunk
     {
-        uint8_t *start_ptr = nullptr;
         uint64_t chunk_base_offset_from_mmap = 0;
-        size_t size_bytes = 0;
         std::atomic<uint32_t> current_offset_nodes;
     };
     std::array<ThreadLocalChunk, MAX_CONCURRENT_THREADS> thread_chunks_;
@@ -60,35 +58,39 @@ public:
 
     STAX_ALWAYS_INLINE uint16_t get_bit_index(uint64_t node_handle) const
     {
-        return *reinterpret_cast<uint16_t *>(mmap_base_addr_ + node_handle);
+        const uint64_t chunk_base_offset = node_handle & ~(CHUNK_ALIGNMENT - 1);
+        const uint64_t offset_in_chunk = node_handle & (CHUNK_ALIGNMENT - 1);
+        const uint32_t node_index = static_cast<uint32_t>((offset_in_chunk - LEFT_CHILD_PTR_ARRAY_OFFSET) >> 3);
+        const uint64_t bit_index_offset = chunk_base_offset + (node_index * sizeof(uint16_t));
+        return *reinterpret_cast<uint16_t *>(mmap_base_addr_ + bit_index_offset);
     }
 
     STAX_ALWAYS_INLINE void set_bit_index(uint64_t node_handle, uint32_t val)
     {
-        *reinterpret_cast<uint16_t *>(mmap_base_addr_ + node_handle) = static_cast<uint16_t>(val);
+        const uint64_t chunk_base_offset = node_handle & ~(CHUNK_ALIGNMENT - 1);
+        const uint64_t offset_in_chunk = node_handle & (CHUNK_ALIGNMENT - 1);
+        const uint32_t node_index = static_cast<uint32_t>((offset_in_chunk - LEFT_CHILD_PTR_ARRAY_OFFSET) >> 3);
+        const uint64_t bit_index_offset = chunk_base_offset + (node_index * sizeof(uint16_t));
+        *reinterpret_cast<uint16_t *>(mmap_base_addr_ + bit_index_offset) = static_cast<uint16_t>(val);
     }
 
     STAX_ALWAYS_INLINE std::atomic<uint64_t> &get_left_child_ptr(uint64_t node_handle)
     {
-        const uint64_t chunk_base_offset = node_handle & ~(CHUNK_ALIGNMENT - 1);
-        const uint64_t offset_in_chunk = node_handle & (CHUNK_ALIGNMENT - 1);
-        const uint32_t node_index = static_cast<uint32_t>(offset_in_chunk >> 1);
-        const uint64_t ptr_offset = chunk_base_offset + LEFT_CHILD_PTR_ARRAY_OFFSET + (node_index * sizeof(uint64_t));
-        return *reinterpret_cast<std::atomic<uint64_t> *>(mmap_base_addr_ + ptr_offset);
+        return *reinterpret_cast<std::atomic<uint64_t> *>(mmap_base_addr_ + node_handle);
     }
 
     STAX_ALWAYS_INLINE std::atomic<uint64_t> &get_right_child_ptr(uint64_t node_handle)
     {
-        const uint64_t chunk_base_offset = node_handle & ~(CHUNK_ALIGNMENT - 1);
-        const uint64_t offset_in_chunk = node_handle & (CHUNK_ALIGNMENT - 1);
-        const uint32_t node_index = static_cast<uint32_t>(offset_in_chunk >> 1);
-        const uint64_t ptr_offset = chunk_base_offset + RIGHT_CHILD_PTR_ARRAY_OFFSET + (node_index * sizeof(uint64_t));
-        return *reinterpret_cast<std::atomic<uint64_t> *>(mmap_base_addr_ + ptr_offset);
+        return *reinterpret_cast<std::atomic<uint64_t> *>(mmap_base_addr_ + node_handle + CHILD_PTR_ARRAY_BYTES);
     }
 
     STAX_ALWAYS_INLINE const uint16_t *get_bit_index_ptr(uint64_t node_handle) const
     {
-        return reinterpret_cast<const uint16_t *>(mmap_base_addr_ + node_handle);
+        const uint64_t chunk_base_offset = node_handle & ~(CHUNK_ALIGNMENT - 1);
+        const uint64_t offset_in_chunk = node_handle & (CHUNK_ALIGNMENT - 1);
+        const uint32_t node_index = static_cast<uint32_t>((offset_in_chunk - LEFT_CHILD_PTR_ARRAY_OFFSET) >> 3);
+        const uint64_t bit_index_offset = chunk_base_offset + (node_index * sizeof(uint16_t));
+        return reinterpret_cast<const uint16_t *>(mmap_base_addr_ + bit_index_offset);
     }
 
     size_t get_total_occupied_size() const;

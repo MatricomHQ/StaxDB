@@ -70,10 +70,6 @@ namespace OSFileExtensions {
     }
 
     std::string write_to_file_raw(OsFileHandleType handle, const void* data, size_t size, size_t offset) {
-        // !!! BUG FIX !!!
-        // Root Cause: The arguments to `pwrite` were incorrect. The second argument should be the data buffer `data`,
-        // and the third argument should be the `size`. The previous code incorrectly passed `size` for both.
-        // Fix: Corrected the arguments to `pwrite(handle, data, size, offset)`.
         if (pwrite(handle, data, size, offset) == -1) {
              return "pwrite failed: " + std::string(strerror(errno));
         }
