@@ -466,7 +466,61 @@ std::vector<uint32_t> GraphReader::find_shortest_path(uint32_t start_node, uint3
 }
 
 uint64_t GraphReader::count_triangles(std::string_view relationship_field_name) {
-    return 0; // Placeholder, complex implementation.
+    uint64_t triangle_count = 0;
+    
+    roaring_bitmap_t* all_nodes = roaring_bitmap_create();
+    if (!all_nodes) return 0;
+
+    std::string prefix = std::string(relationship_field_name) + KEY_SEPARATOR;
+    for (auto cursor = fvo_col_->seek_raw(ctx_, prefix); cursor->is_valid() && cursor->key().starts_with(prefix); cursor->next()) {
+        std::string_view key = cursor->key();
+        std::string_view remainder = key.substr(prefix.length());
+        
+        if (remainder.length() == GraphTransaction::BINARY_U32_SIZE + 1 + GraphTransaction::BINARY_U32_SIZE) {
+            uint32_t target_id = from_binary_key_u32(remainder.substr(0, GraphTransaction::BINARY_U32_SIZE));
+            uint32_t source_id = from_binary_key_u32(remainder.substr(GraphTransaction::BINARY_U32_SIZE + 1));
+            roaring_bitmap_add(all_nodes, source_id);
+            roaring_bitmap_add(all_nodes, target_id);
+        }
+    }
+
+    roaring_uint32_iterator_t* it = roaring_create_iterator(all_nodes);
+    while(it->has_next) {
+        uint32_t u;
+        roaring_read_uint32(it, &u);
+
+        roaring_bitmap_t* out_neighbors_u = roaring_bitmap_create();
+        get_outgoing_relationships_into_roaring(u, relationship_field_name, out_neighbors_u);
+        
+        roaring_uint32_iterator_t* it_v = roaring_create_iterator(out_neighbors_u);
+        while(it_v->has_next) {
+            uint32_t v;
+            roaring_read_uint32(it_v, &v);
+            
+            roaring_bitmap_t* out_neighbors_v = roaring_bitmap_create();
+            get_outgoing_relationships_into_roaring(v, relationship_field_name, out_neighbors_v);
+            
+            roaring_uint32_iterator_t* it_w = roaring_create_iterator(out_neighbors_v);
+            while(it_w->has_next) {
+                uint32_t w;
+                roaring_read_uint32(it_w, &w);
+                if (has_relationship(w, relationship_field_name, u)) {
+                    triangle_count++;
+                }
+                roaring_advance_uint32_iterator(it_w);
+            }
+            roaring_free_iterator(it_w);
+            roaring_bitmap_free(out_neighbors_v);
+            roaring_advance_uint32_iterator(it_v);
+        }
+        roaring_free_iterator(it_v);
+        roaring_bitmap_free(out_neighbors_u);
+        roaring_advance_uint32_iterator(it);
+    }
+    roaring_free_iterator(it);
+    roaring_bitmap_free(all_nodes);
+
+    return triangle_count;
 }
 
 std::unique_ptr<QueryPipeline> GraphReader::get_common_neighbors(uint32_t node1, uint32_t node2, std::string_view relationship_field_name) {
