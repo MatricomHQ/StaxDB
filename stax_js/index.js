@@ -95,7 +95,15 @@ class StaxQueryBuilder {
         if (typeof value === 'object' && value !== null) {
             
             if (value.hasOwnProperty('gte') || value.hasOwnProperty('lte') || value.hasOwnProperty('gt') || value.hasOwnProperty('lt')) {
-                this._plan.push({ op_type: opType, field, value: { gte: value.gte ?? value.gt, lte: value.lte ?? value.lt } });
+                const gteValue = value.gte ?? value.gt;
+                const lteValue = value.lte ?? value.lt;
+
+                const processedValue = {
+                    gte: gteValue !== undefined ? BigInt(gteValue) : undefined,
+                    lte: lteValue !== undefined ? BigInt(lteValue) : undefined
+                };
+
+                this._plan.push({ op_type: opType, field, value: processedValue });
             } 
             
             else if (value.hasOwnProperty('near') && value.hasOwnProperty('radius')) {

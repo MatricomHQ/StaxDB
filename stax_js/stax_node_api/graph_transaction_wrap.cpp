@@ -104,16 +104,15 @@ Napi::Value GraphTransactionWrap::InsertObject(const Napi::CallbackInfo& info) {
         
         for (const auto& prop : c_properties) {
             std::string_view field_name_sv = to_string_view(prop.field);
-            uint32_t field_id = global_id_map.get_or_create_id(field_name_sv);
             switch (prop.type) {
                 case STAX_PROP_STRING:
-                    txn_->insert_fact_string(obj_id, field_id, field_name_sv, to_string_view(prop.value.string_val));
+                    txn_->insert_fact_string(obj_id, field_name_sv, to_string_view(prop.value.string_val));
                     break;
                 case STAX_PROP_NUMERIC:
-                    txn_->insert_fact_numeric(obj_id, field_id, field_name_sv, prop.value.numeric_val);
+                    txn_->insert_fact_numeric(obj_id, field_name_sv, prop.value.numeric_val);
                     break;
                 case STAX_PROP_GEO:
-                    txn_->insert_fact_geo(obj_id, field_id, field_name_sv, prop.value.geo_val.lat, prop.value.geo_val.lon);
+                    txn_->insert_fact_geo(obj_id, field_name_sv, prop.value.geo_val.lat, prop.value.geo_val.lon);
                     break;
             }
         }
@@ -170,8 +169,7 @@ void GraphTransactionWrap::InsertRelationship(const Napi::CallbackInfo& info) {
     std::string rel_type = info[1].As<Napi::String>();
     uint32_t target_id = info[2].As<Napi::Number>().Uint32Value();
     try {
-        uint32_t rel_id = global_id_map.get_or_create_id(rel_type);
-        txn_->insert_fact(source_id, rel_id, target_id);
+        txn_->insert_fact(source_id, rel_type, target_id);
     } catch (const std::exception& e) {
         Napi::Error::New(env, e.what()).ThrowAsJavaScriptException();
     }

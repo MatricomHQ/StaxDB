@@ -17,13 +17,25 @@
 #include <charconv> 
 #include <map>
 #include <set>
+#include <cstdio> // For printf
 
+static void hex_dump_slice(const char* prefix, StaxSlice s) {
+    printf("%s [size=%zu]: ", prefix, s.len);
+    if (!s.data) {
+        printf(" (null)\n");
+        return;
+    }
+    for (size_t i = 0; i < s.len; ++i) {
+        printf("%02hhx ", static_cast<unsigned char>(s.data[i]));
+    }
+    printf("\n");
+}
 
 
 struct CompiledQueryStep {
     StaxGraphQueryOpType op_type;
     StaxGraphTraversalDirection direction;
-    uint32_t field_id;
+    std::string field_name; 
     bool uses_numeric_range;
     bool has_filter;
     uint8_t filter_property_count;
@@ -45,8 +57,6 @@ struct StaxDB_t {
 
 struct StaxGraph_t {
     Database* db_instance;
-    // ** REMOVED: No longer holds a shared transaction **
-    // std::unique_ptr<GraphTransaction> txn;
     std::vector<std::vector<CompiledQueryStep>> compiled_plans;
 };
 
@@ -295,14 +305,11 @@ StaxGraph staxdb_get_graph(StaxDB db) {
 }
 
 void staxdb_graph_insert_fact_string(StaxGraph graph, uint32_t obj_id, StaxSlice field, StaxSlice value) {
-    // This function is now a high-level wrapper that creates its own transaction.
     clear_last_error();
     if (!graph) { set_last_error("Graph handle is invalid."); return; }
     try {
         GraphTransaction txn(graph->db_instance, 0);
-        std::string_view field_name_sv = to_string_view(field);
-        uint32_t field_id = global_id_map.get_or_create_id(field_name_sv);
-        txn.insert_fact_string(obj_id, field_id, field_name_sv, to_string_view(value));
+        txn.insert_fact_string(obj_id, to_string_view(field), to_string_view(value));
         txn.commit();
     } catch (const std::exception& e) {
         set_last_error(e.what());
@@ -314,9 +321,7 @@ void staxdb_graph_insert_fact_numeric(StaxGraph graph, uint32_t obj_id, StaxSlic
     if (!graph) { set_last_error("Graph handle is invalid."); return; }
     try {
         GraphTransaction txn(graph->db_instance, 0);
-        std::string_view field_name_sv = to_string_view(field);
-        uint32_t field_id = global_id_map.get_or_create_id(field_name_sv);
-        txn.insert_fact_numeric(obj_id, field_id, field_name_sv, value);
+        txn.insert_fact_numeric(obj_id, to_string_view(field), value);
         txn.commit();
     } catch (const std::exception& e) {
         set_last_error(e.what());
@@ -328,9 +333,7 @@ void staxdb_graph_insert_fact_geo(StaxGraph graph, uint32_t obj_id, StaxSlice fi
     if (!graph) { set_last_error("Graph handle is invalid."); return; }
     try {
         GraphTransaction txn(graph->db_instance, 0);
-        std::string_view field_name_sv = to_string_view(field);
-        uint32_t field_id = global_id_map.get_or_create_id(field_name_sv);
-        txn.insert_fact_geo(obj_id, field_id, field_name_sv, latitude, longitude);
+        txn.insert_fact_geo(obj_id, to_string_view(field), latitude, longitude);
         txn.commit();
     } catch (const std::exception& e) {
         set_last_error(e.what());
@@ -342,8 +345,7 @@ void staxdb_graph_insert_relationship(StaxGraph graph, uint32_t source_id, StaxS
     if (!graph) { set_last_error("Graph handle is invalid."); return; }
     try {
         GraphTransaction txn(graph->db_instance, 0);
-        uint32_t rel_id = global_id_map.get_or_create_id(to_string_view(rel_type));
-        txn.insert_fact(source_id, rel_id, target_id);
+        txn.insert_fact(source_id, to_string_view(rel_type), target_id);
         txn.commit();
     } catch (const std::exception& e) {
         set_last_error(e.what());
@@ -351,8 +353,6 @@ void staxdb_graph_insert_relationship(StaxGraph graph, uint32_t source_id, StaxS
 }
 
 void staxdb_graph_commit(StaxGraph graph) {
-    // This function is now a NO-OP as transactions are committed atomically.
-    // It's kept for API compatibility but does nothing.
     clear_last_error();
 }
 
@@ -375,16 +375,15 @@ uint32_t staxdb_graph_insert_object(StaxGraph graph, const StaxObjectProperty* p
         for (size_t i = 0; i < num_properties; ++i) {
             const auto& prop = properties[i];
             std::string_view field_name_sv = to_string_view(prop.field);
-            uint32_t field_id = global_id_map.get_or_create_id(field_name_sv);
             switch (prop.type) {
                 case STAX_PROP_STRING:
-                    txn.insert_fact_string(obj_id, field_id, field_name_sv, to_string_view(prop.value.string_val));
+                    txn.insert_fact_string(obj_id, field_name_sv, to_string_view(prop.value.string_val));
                     break;
                 case STAX_PROP_NUMERIC:
-                    txn.insert_fact_numeric(obj_id, field_id, field_name_sv, prop.value.numeric_val);
+                    txn.insert_fact_numeric(obj_id, field_name_sv, prop.value.numeric_val);
                     break;
                 case STAX_PROP_GEO:
-                    txn.insert_fact_geo(obj_id, field_id, field_name_sv, prop.value.geo_val.lat, prop.value.geo_val.lon);
+                    txn.insert_fact_geo(obj_id, field_name_sv, prop.value.geo_val.lat, prop.value.geo_val.lon);
                     break;
             }
         }
@@ -421,9 +420,9 @@ StaxResultSet staxdb_graph_get_object(StaxGraph graph, uint32_t obj_id) {
         auto kv_data = new StaxKVResultSetData_t();
         TxnContext read_ctx = graph->db_instance->begin_transaction_context(0, true);
         
-        char prefix_buf[GraphTransaction::BINARY_U32_SIZE];
-        size_t prefix_len = to_binary_key_buf(obj_id, prefix_buf, sizeof(prefix_buf));
-        std::string_view prefix(prefix_buf, prefix_len);
+        GraphReader reader(graph->db_instance, read_ctx);
+        auto all_facts = reader.get_properties_and_relationships(obj_id);
+
         
         std::string id_key_str = "__stax_id";
         std::string id_val_str = std::to_string(obj_id);
@@ -434,33 +433,58 @@ StaxResultSet staxdb_graph_get_object(StaxGraph graph, uint32_t obj_id) {
         kv_data->kv_pairs.push_back({{reinterpret_cast<const char*>(key_offset), id_key_str.length()}, {reinterpret_cast<const char*>(val_offset), id_val_str.length()}});
 
 
-        for (auto cursor = graph->db_instance->get_ofv_collection()->seek(read_ctx, prefix); cursor->is_valid() && cursor->key().starts_with(prefix); cursor->next()) {
-            std::string_view key_view = cursor->key();
-            std::string_view value_payload = cursor->value();
-            
-            char type_prefix = key_view[GraphTransaction::BINARY_U32_SIZE];
-            if (type_prefix != 'p' || value_payload.length() < 2) continue;
-
-            size_t null_pos = value_payload.find('\0', 1);
-            if (null_pos == std::string_view::npos) continue;
-
-            std::string_view field_name = value_payload.substr(1, null_pos - 1);
-            std::string_view value_data = value_payload.substr(null_pos + 1);
-
+        for (const auto& fact : all_facts) {
+            const auto& [subj, pred, obj] = fact;
             key_offset = kv_data->data_buffer.size();
-            kv_data->data_buffer.insert(kv_data->data_buffer.end(), field_name.begin(), field_name.end());
+            kv_data->data_buffer.insert(kv_data->data_buffer.end(), pred.begin(), pred.end());
             val_offset = kv_data->data_buffer.size();
-            
-            char value_type_code = value_payload[0];
-            if(value_type_code == StaxValueType::Numeric || value_type_code == StaxValueType::Geo) {
-                
-                std::string num_str = std::to_string(from_binary_key_u64(value_data));
-                kv_data->data_buffer.insert(kv_data->data_buffer.end(), num_str.begin(), num_str.end());
-                kv_data->kv_pairs.push_back({{reinterpret_cast<const char*>(key_offset), field_name.length()}, {reinterpret_cast<const char*>(val_offset), num_str.length()}});
-            } else {
-                kv_data->data_buffer.insert(kv_data->data_buffer.end(), value_data.begin(), value_data.end());
-                kv_data->kv_pairs.push_back({{reinterpret_cast<const char*>(key_offset), field_name.length()}, {reinterpret_cast<const char*>(val_offset), value_data.length()}});
-            }
+            kv_data->data_buffer.insert(kv_data->data_buffer.end(), obj.begin(), obj.end());
+            kv_data->kv_pairs.push_back({{reinterpret_cast<const char*>(key_offset), pred.length()}, {reinterpret_cast<const char*>(val_offset), obj.length()}});
+        }
+
+        const char* base_ptr = kv_data->data_buffer.data();
+        for (auto& pair : kv_data->kv_pairs) {
+            pair.key.data = base_ptr + reinterpret_cast<size_t>(pair.key.data);
+            pair.value.data = base_ptr + reinterpret_cast<size_t>(pair.value.data);
+        }
+        
+        return new StaxResultSet_t{KV_RESULT, nullptr, kv_data};
+
+    } catch (const std::exception& e) {
+        set_last_error(e.what());
+        return NULL;
+    }
+}
+
+StaxResultSet staxdb_graph_get_object_properties(StaxGraph graph, uint32_t obj_id) {
+    clear_last_error();
+    if (!graph || !graph->db_instance) {
+        set_last_error("Graph handle is invalid.");
+        return NULL;
+    }
+    try {
+        auto kv_data = new StaxKVResultSetData_t();
+        TxnContext read_ctx = graph->db_instance->begin_transaction_context(0, true);
+        
+        GraphReader reader(graph->db_instance, read_ctx);
+        auto all_facts = reader.get_properties(obj_id);
+
+        std::string id_key_str = "__stax_id";
+        std::string id_val_str = std::to_string(obj_id);
+        size_t key_offset = kv_data->data_buffer.size();
+        kv_data->data_buffer.insert(kv_data->data_buffer.end(), id_key_str.begin(), id_key_str.end());
+        size_t val_offset = kv_data->data_buffer.size();
+        kv_data->data_buffer.insert(kv_data->data_buffer.end(), id_val_str.begin(), id_val_str.end());
+        kv_data->kv_pairs.push_back({{reinterpret_cast<const char*>(key_offset), id_key_str.length()}, {reinterpret_cast<const char*>(val_offset), id_val_str.length()}});
+
+
+        for (const auto& fact : all_facts) {
+            const auto& [subj, pred, obj] = fact;
+            key_offset = kv_data->data_buffer.size();
+            kv_data->data_buffer.insert(kv_data->data_buffer.end(), pred.begin(), pred.end());
+            val_offset = kv_data->data_buffer.size();
+            kv_data->data_buffer.insert(kv_data->data_buffer.end(), obj.begin(), obj.end());
+            kv_data->kv_pairs.push_back({{reinterpret_cast<const char*>(key_offset), pred.length()}, {reinterpret_cast<const char*>(val_offset), obj.length()}});
         }
 
         const char* base_ptr = kv_data->data_buffer.data();
@@ -481,7 +505,6 @@ StaxResultSet staxdb_graph_get_object(StaxGraph graph, uint32_t obj_id) {
 uint32_t staxdb_graph_compile_plan(StaxGraph graph, const StaxGraphQueryStep* steps, size_t num_steps) {
     clear_last_error();
     if (!graph) { set_last_error("Graph handle is invalid."); return -1; }
-    if (!steps && num_steps > 0) { set_last_error("Query steps pointer is NULL."); return -1; }
     try {
         std::vector<CompiledQueryStep> compiled_steps;
         compiled_steps.reserve(num_steps);
@@ -490,7 +513,7 @@ uint32_t staxdb_graph_compile_plan(StaxGraph graph, const StaxGraphQueryStep* st
             compiled_steps.push_back({
                 step.op_type,
                 step.direction,
-                global_id_map.get_or_create_id(to_string_view(step.field)),
+                std::string(to_string_view(step.field)),
                 step.uses_numeric_range,
                 step.has_filter,
                 step.filter_property_count
@@ -506,18 +529,16 @@ uint32_t staxdb_graph_compile_plan(StaxGraph graph, const StaxGraphQueryStep* st
 
 StaxResultSet staxdb_graph_execute_plan(StaxGraph graph, uint32_t plan_id, const StaxSlice* params, size_t num_params) {
     clear_last_error();
-    if (!graph || !graph->db_instance) {
-        set_last_error("Graph handle is invalid.");
-        return NULL;
+    printf("\n--- [C-API] staxdb_graph_execute_plan ---\n");
+    printf("Plan ID: %u, Num Params: %zu\n", plan_id, num_params);
+    for (size_t i = 0; i < num_params; ++i) {
+        char prefix[32];
+        snprintf(prefix, sizeof(prefix), "  Param %zu", i);
+        hex_dump_slice(prefix, params[i]);
     }
-    if (plan_id >= graph->compiled_plans.size()) {
-        set_last_error("Invalid query plan ID.");
-        return NULL;
-    }
-    if (!params && num_params > 0) {
-        set_last_error("Params pointer is NULL but num_params > 0.");
-        return NULL;
-    }
+
+    if (!graph || !graph->db_instance) { set_last_error("Graph handle is invalid."); return NULL; }
+    if (plan_id >= graph->compiled_plans.size()) { set_last_error("Invalid query plan ID."); return NULL; }
 
     try {
         const auto& plan = graph->compiled_plans[plan_id];
@@ -530,56 +551,36 @@ StaxResultSet staxdb_graph_execute_plan(StaxGraph graph, uint32_t plan_id, const
             roaring_bitmap_t* step_results = roaring_bitmap_create();
             auto get_filter_results = [&](roaring_bitmap_t* target_bitmap) {
                 if (step.uses_numeric_range) {
-                    if (param_idx + 1 >= num_params) {
-                         set_last_error("Insufficient parameters for numeric range query.");
-                         return false;
-                    }
+                    if (param_idx + 1 >= num_params) { set_last_error("Insufficient params for numeric range."); return false; }
                     uint64_t gte = from_binary_key_u64(to_string_view(params[param_idx++]));
                     uint64_t lte = from_binary_key_u64(to_string_view(params[param_idx++]));
-                    reader.get_objects_by_property_range_into_roaring(step.field_id, gte, lte, target_bitmap);
+                    reader.get_objects_by_property_range_into_roaring(step.field_name, gte, lte, target_bitmap);
                 } else {
-                    if (param_idx >= num_params) {
-                         set_last_error("Insufficient parameters for property query.");
-                         return false;
-                    }
-                    uint32_t value_id = global_id_map.get_id(to_string_view(params[param_idx++]));
-                    reader.get_objects_by_property_into_roaring(step.field_id, value_id, target_bitmap);
+                    if (param_idx >= num_params) { set_last_error("Insufficient params for property query."); return false; }
+                    reader.get_objects_by_property_into_roaring(step.field_name, to_string_view(params[param_idx++]), target_bitmap);
                 }
                 return true;
             };
             switch (step.op_type) {
                 case STAX_GRAPH_FIND_BY_PROPERTY:
                     roaring_bitmap_free(current_results);
-                    if (!get_filter_results(step_results)) {
-                        roaring_bitmap_free(step_results);
-                        return NULL;
-                    }
+                    if (!get_filter_results(step_results)) { roaring_bitmap_free(step_results); return NULL; }
                     current_results = step_results;
                     break;
                 case STAX_GRAPH_TRAVERSE:
-                    if (step.direction == STAX_GRAPH_OUTGOING) reader.get_outgoing_relationships_for_many_into_roaring(current_results, step.field_id, step_results);
-                    else reader.get_incoming_relationships_for_many_into_roaring(current_results, step.field_id, step_results);
+                    if (step.direction == STAX_GRAPH_OUTGOING) reader.get_outgoing_relationships_for_many_into_roaring(current_results, step.field_name, step_results);
+                    else reader.get_incoming_relationships_for_many_into_roaring(current_results, step.field_name, step_results);
                     
                     if (step.has_filter) {
                         roaring_bitmap_t* final_filter_bitmap = roaring_bitmap_create();
-                        
                         for(uint8_t i = 0; i < step.filter_property_count; ++i) {
                             roaring_bitmap_t* prop_filter_bitmap = roaring_bitmap_create();
-                            
-                             if (param_idx + 1 >= num_params) {
-                                set_last_error("Insufficient parameters for traverse filter property.");
-                                roaring_bitmap_free(prop_filter_bitmap);
-                                break;
-                             }
-                            uint32_t filter_field_id = global_id_map.get_id(to_string_view(params[param_idx++]));
-                            uint32_t filter_value_id = global_id_map.get_id(to_string_view(params[param_idx++]));
-                            reader.get_objects_by_property_into_roaring(filter_field_id, filter_value_id, prop_filter_bitmap);
-
-                            if(i == 0) {
-                                roaring_bitmap_or_inplace(final_filter_bitmap, prop_filter_bitmap);
-                            } else {
-                                roaring_bitmap_and_inplace(final_filter_bitmap, prop_filter_bitmap);
-                            }
+                            if (param_idx + 1 >= num_params) { set_last_error("Insufficient params for traverse filter."); break; }
+                            std::string_view filter_field_name = to_string_view(params[param_idx++]);
+                            std::string_view filter_value_str = to_string_view(params[param_idx++]);
+                            reader.get_objects_by_property_into_roaring(filter_field_name, filter_value_str, prop_filter_bitmap);
+                            if(i == 0) roaring_bitmap_or_inplace(final_filter_bitmap, prop_filter_bitmap);
+                            else roaring_bitmap_and_inplace(final_filter_bitmap, prop_filter_bitmap);
                             roaring_bitmap_free(prop_filter_bitmap);
                         }
                         roaring_bitmap_and_inplace(step_results, final_filter_bitmap);
@@ -590,20 +591,12 @@ StaxResultSet staxdb_graph_execute_plan(StaxGraph graph, uint32_t plan_id, const
                     current_results = step_results;
                     break;
                 case STAX_GRAPH_INTERSECT:
-                    if (!get_filter_results(step_results)) {
-                        roaring_bitmap_free(step_results);
-                        roaring_bitmap_free(current_results);
-                        return NULL;
-                    }
+                    if (!get_filter_results(step_results)) { roaring_bitmap_free(step_results); roaring_bitmap_free(current_results); return NULL; }
                     roaring_bitmap_and_inplace(current_results, step_results);
                     roaring_bitmap_free(step_results);
                     break;
                 case STAX_GRAPH_UNION:
-                    if (!get_filter_results(step_results)) {
-                        roaring_bitmap_free(step_results);
-                        roaring_bitmap_free(current_results);
-                        return NULL;
-                    }
+                    if (!get_filter_results(step_results)) { roaring_bitmap_free(step_results); roaring_bitmap_free(current_results); return NULL; }
                     roaring_bitmap_or_inplace(current_results, step_results);
                     roaring_bitmap_free(step_results);
                     break;
@@ -612,7 +605,6 @@ StaxResultSet staxdb_graph_execute_plan(StaxGraph graph, uint32_t plan_id, const
         
         auto result_set = new StaxResultSet_t{GRAPH_ID_RESULT, current_results, graph};
         return result_set;
-
     } catch (const std::exception& e) {
         set_last_error(e.what());
         return NULL;
@@ -627,18 +619,11 @@ void staxdb_graph_update_fact_string(StaxGraph graph, uint32_t obj_id, StaxSlice
         TxnContext read_ctx = {0, txn.get_read_snapshot_id(), 0};
         GraphReader reader(graph->db_instance, read_ctx);
         std::string_view field_name_sv = to_string_view(field);
-        uint32_t field_id = global_id_map.get_or_create_id(field_name_sv);
-
-        auto old_value_opt = reader.get_property_for_object_string(obj_id, field_id);
-        if (old_value_opt) {
-            txn.remove_fact(obj_id, field_id, *old_value_opt);
-        }
-        
-        txn.insert_fact_string(obj_id, field_id, field_name_sv, to_string_view(new_value));
+        auto old_value_opt = reader.get_property_for_object_string(obj_id, field_name_sv);
+        if (old_value_opt) txn.remove_fact(obj_id, field_name_sv, *old_value_opt);
+        txn.insert_fact_string(obj_id, field_name_sv, to_string_view(new_value));
         txn.commit();
-    } catch (const std::exception& e) {
-        set_last_error(e.what());
-    }
+    } catch (const std::exception& e) { set_last_error(e.what()); }
 }
 
 void staxdb_graph_update_fact_numeric(StaxGraph graph, uint32_t obj_id, StaxSlice field, uint64_t new_value) {
@@ -649,18 +634,11 @@ void staxdb_graph_update_fact_numeric(StaxGraph graph, uint32_t obj_id, StaxSlic
         TxnContext read_ctx = {0, txn.get_read_snapshot_id(), 0};
         GraphReader reader(graph->db_instance, read_ctx);
         std::string_view field_name_sv = to_string_view(field);
-        uint32_t field_id = global_id_map.get_or_create_id(field_name_sv);
-
-        auto old_value_opt = reader.get_property_for_object_numeric(obj_id, field_id);
-        if (old_value_opt) {
-            txn.remove_fact_numeric(obj_id, field_id, *old_value_opt);
-        }
-        
-        txn.insert_fact_numeric(obj_id, field_id, field_name_sv, new_value);
+        auto old_value_opt = reader.get_property_for_object_numeric(obj_id, field_name_sv);
+        if (old_value_opt) txn.remove_fact_numeric(obj_id, field_name_sv, *old_value_opt);
+        txn.insert_fact_numeric(obj_id, field_name_sv, new_value);
         txn.commit();
-    } catch (const std::exception& e) {
-        set_last_error(e.what());
-    }
+    } catch (const std::exception& e) { set_last_error(e.what()); }
 }
 
 void staxdb_graph_delete_object(StaxGraph graph, uint32_t obj_id) {
@@ -670,9 +648,7 @@ void staxdb_graph_delete_object(StaxGraph graph, uint32_t obj_id) {
         GraphTransaction txn(graph->db_instance, 0);
         txn.clear_object_facts(obj_id);
         txn.commit();
-    } catch (const std::exception& e) {
-        set_last_error(e.what());
-    }
+    } catch (const std::exception& e) { set_last_error(e.what()); }
 }
 
 
@@ -728,19 +704,12 @@ StaxPageResult staxdb_resultset_get_page(StaxResultSet result_set, uint32_t page
                 uint32_t id;
                 roaring_read_uint32(it, &id);
                 
-                StaxResultSet temp_obj_rs = staxdb_graph_get_object(graph_handle, id);
+                StaxResultSet temp_obj_rs = staxdb_graph_get_object_properties(graph_handle, id);
                 if(temp_obj_rs && temp_obj_rs->kv_data) {
                     StaxKVResultSetData_t* obj_kv_data = (StaxKVResultSetData_t*)temp_obj_rs->kv_data;
                     
-                    // !!! BUG FIX !!! Check if the object has more than just its own ID.
-                    // If an object only has 1 property, it must be the auto-generated '__stax_id'.
-                    // This indicates a "ghost" record that has been deleted, so we should skip it.
                     if (obj_kv_data->kv_pairs.size() > 1) {
-                        size_t key_offset = page_data_buffer.size();
-                        char id_key_buf[4];
-                        to_binary_key_buf(id, id_key_buf, 4);
-                        page_data_buffer.insert(page_data_buffer.end(), id_key_buf, id_key_buf + 4);
-
+                        
                         std::string serialized_obj;
                         for(size_t i = 0; i < obj_kv_data->kv_pairs.size(); ++i) {
                             const auto& pair = obj_kv_data->kv_pairs[i];
@@ -751,6 +720,11 @@ StaxPageResult staxdb_resultset_get_page(StaxResultSet result_set, uint32_t page
                             serialized_obj.append("|");
                             }
                         }
+                        
+                        size_t key_offset = page_data_buffer.size();
+                        char id_key_buf[4];
+                        to_binary_key_buf(id, id_key_buf, 4);
+                        page_data_buffer.insert(page_data_buffer.end(), id_key_buf, id_key_buf + 4);
 
                         size_t val_offset = page_data_buffer.size();
                         page_data_buffer.insert(page_data_buffer.end(), serialized_obj.begin(), serialized_obj.end());

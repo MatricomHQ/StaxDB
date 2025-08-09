@@ -7,11 +7,56 @@
 #include <algorithm>
 #include <variant>
 #include <iostream>
+#include <cstdio> // For printf
 
 #include "stax_api/staxdb_api.h"
 #include "stax_db/db.h"
 #include "stax_common/geohash.hpp"
 #include "stax_common/binary_utils.h"
+
+// Helper function for hex dumping
+static void hex_dump(const char* prefix, const char* data, size_t size) {
+    printf("%s [size=%zu]: ", prefix, size);
+    if (!data) {
+        printf(" (null)\n");
+        return;
+    }
+    for (size_t i = 0; i < size; ++i) {
+        printf("%02hhx ", static_cast<unsigned char>(data[i]));
+    }
+    printf("\n");
+}
+
+// C++ implementation of geohash encoding
+static uint64_t encode_geohash(double lat, double lon, int precision = 64) {
+    uint64_t geohash = 0;
+    double lat_min = -90.0, lat_max = 90.0;
+    double lon_min = -180.0, lon_max = 180.0;
+    bool is_lon = true;
+
+    for (int i = 0; i < precision; i++) {
+        geohash <<= 1;
+        if (is_lon) {
+            double mid = lon_min + (lon_max - lon_min) / 2.0;
+            if (lon > mid) {
+                geohash |= 1;
+                lon_min = mid;
+            } else {
+                lon_max = mid;
+            }
+        } else {
+            double mid = lat_min + (lat_max - lat_min) / 2.0;
+            if (lat > mid) {
+                geohash |= 1;
+                lat_min = mid;
+            } else {
+                lat_max = mid;
+            }
+        }
+        is_lon = !is_lon;
+    }
+    return geohash;
+}
 
 
 Napi::FunctionReference DatabaseWrap::constructor;
@@ -50,10 +95,6 @@ Napi::Object DatabaseWrap::Init(Napi::Env env, Napi::Object exports) {
         InstanceMethod("insertBatchAsync", &DatabaseWrap::InsertBatchAsync),
         InstanceMethod("multiGetAsync", &DatabaseWrap::MultiGetAsync),
         StaticMethod("dropSync", DropSync),
-        // !!! BUG FIX !!!
-        // Root Cause: MSVC compiler fails template deduction on Napi::Function::New for plain function pointers.
-        // Fix: Expose `getLastError` as a static method on the class itself. This is a more robust
-        // and idiomatic way to handle this in node-addon-api and avoids compiler issues.
         StaticMethod("getLastError", GetLastError)
     });
     constructor = Napi::Persistent(func);
@@ -379,6 +420,11 @@ Napi::Value GraphWrap::CompileQuery(const Napi::CallbackInfo& info) {
         if(step_obj.Has("value")) {
             Napi::Value val = step_obj.Get("value");
             if(val.IsObject()) {
+                Napi::Object obj = val.As<Napi::Object>();
+                if (obj.Has("gte") || obj.Has("lte") || obj.Has("gt") || obj.Has("lt") || obj.Has("lat") || obj.Has("lon")) {
+                     uses_range = true;
+                }
+            } else if (val.IsNumber() || val.IsBigInt()) {
                 uses_range = true;
             }
         }
@@ -393,76 +439,109 @@ Napi::Value GraphWrap::ExecuteQuery(const Napi::CallbackInfo& info) {
     uint32_t plan_id = info[0].As<Napi::Number>().Uint32Value();
     Napi::Array plan_js = info[1].As<Napi::Array>();
     
-    std::vector<StaxSlice> c_params;
+    printf("\n--- [N-API] GraphWrap::ExecuteQuery ---\n");
+    printf("Plan ID: %u\n", plan_id);
+
     std::vector<std::string> param_storage;
     std::vector<char> binary_param_buffer;
-    bool lossless; 
-
     param_storage.reserve(plan_js.Length() * 2);
-    binary_param_buffer.reserve(plan_js.Length() * 16);
 
+    // Pass 1: Calculate total size needed for binary buffer and gather string data
+    size_t total_binary_size = 0;
     for (uint32_t i = 0; i < plan_js.Length(); ++i) {
         Napi::Object step = plan_js.Get(i).As<Napi::Object>();
-        
         if (step.Has("value")) {
             Napi::Value val = step.Get("value");
-            if (val.IsString()) {
+            if (val.IsObject()) {
+                Napi::Object obj = val.As<Napi::Object>();
+                if (obj.Has("gte") || obj.Has("lte") || obj.Has("gt") || obj.Has("lt") || obj.Has("lat") || obj.Has("lon")) {
+                    total_binary_size += 16; // For gte and lte
+                }
+            } else if (val.IsNumber() || val.IsBigInt()) {
+                total_binary_size += 16;
+            } else if (val.IsString()) {
                 param_storage.push_back(val.As<Napi::String>());
-                c_params.push_back({param_storage.back().c_str(), param_storage.back().length()});
-            } else if (val.IsObject()) {
-                 Napi::Object obj = val.As<Napi::Object>();
-                 uint64_t gte = 0, lte = 0;
-                 if (obj.Has("lat") && obj.Has("lon")) {
-                    double lat = obj.Get("lat").As<Napi::Number>().DoubleValue();
-                    double lon = obj.Get("lon").As<Napi::Number>().DoubleValue();
-                    gte = lte = GeoHash::encode(lat, lon);
-                 } else { 
-                    Napi::Value gte_val = obj.Get("gte");
-                    if (gte_val.IsBigInt()) {
-                        gte = gte_val.As<Napi::BigInt>().Uint64Value(&lossless);
-                    } else if (gte_val.IsNumber()) {
-                        gte = gte_val.As<Napi::Number>().Int64Value();
-                    }
-                    
-                    Napi::Value lte_val = obj.Get("lte");
-                    if (lte_val.IsBigInt()) {
-                        lte = lte_val.As<Napi::BigInt>().Uint64Value(&lossless);
-                    } else if (lte_val.IsNumber()) {
-                        lte = lte_val.As<Napi::Number>().Int64Value();
-                    } else {
-                        lte = std::numeric_limits<uint64_t>::max();
-                    }
-                 }
-                 size_t offset = binary_param_buffer.size();
-                 binary_param_buffer.resize(offset + 16);
-                 to_binary_key_buf(gte, binary_param_buffer.data() + offset, 8);
-                 c_params.push_back({binary_param_buffer.data() + offset, 8});
-                 to_binary_key_buf(lte, binary_param_buffer.data() + offset + 8, 8);
-                 c_params.push_back({binary_param_buffer.data() + offset + 8, 8});
-            } else if (val.IsNumber()) {
-                param_storage.push_back(val.ToString());
-                c_params.push_back({param_storage.back().c_str(), param_storage.back().length()});
             }
         }
-        
         if (step.Get("op_type").As<Napi::String>().Utf8Value() == "traverse" && step.Has("filter")) {
             Napi::Object filter_obj = step.Get("filter").As<Napi::Object>();
             Napi::Array filter_keys = filter_obj.GetPropertyNames();
             for (uint32_t j = 0; j < filter_keys.Length(); ++j) {
                 Napi::Value key_val = filter_keys.Get(j);
-                std::string key_str = key_val.As<Napi::String>();
-                std::string val_str = filter_obj.Get(key_val).ToString(); 
+                param_storage.push_back(key_val.As<Napi::String>());
+                param_storage.push_back(filter_obj.Get(key_val).ToString());
+            }
+        }
+    }
+    binary_param_buffer.resize(total_binary_size);
+    char* binary_buf_ptr = binary_param_buffer.data();
+    
+    // Pass 2: Fill the binary buffer and create the final slice vector
+    std::vector<StaxSlice> c_params;
+    size_t string_param_idx = 0;
 
-                param_storage.push_back(key_str);
-                c_params.push_back({param_storage.back().c_str(), param_storage.back().length()});
-                param_storage.push_back(val_str);
-                c_params.push_back({param_storage.back().c_str(), param_storage.back().length()});
+    for (uint32_t i = 0; i < plan_js.Length(); ++i) {
+        Napi::Object step = plan_js.Get(i).As<Napi::Object>();
+        if (step.Has("value")) {
+            Napi::Value val = step.Get("value");
+            if (val.IsObject() || val.IsNumber() || val.IsBigInt()) {
+                uint64_t gte = 0, lte = 0;
+                bool lossless;
+                if (val.IsObject()) {
+                    Napi::Object obj = val.As<Napi::Object>();
+                    if (obj.Has("lat") && obj.Has("lon")) {
+                        double lat = obj.Get("lat").As<Napi::Number>().DoubleValue();
+                        double lon = obj.Get("lon").As<Napi::Number>().DoubleValue();
+                        gte = lte = encode_geohash(lat, lon);
+                    } else {
+                        if (obj.Has("gte")) {
+                            Napi::Value gte_val = obj.Get("gte");
+                            if (gte_val.IsBigInt()) gte = gte_val.As<Napi::BigInt>().Uint64Value(&lossless);
+                            else if (gte_val.IsNumber()) gte = gte_val.As<Napi::Number>().Int64Value();
+                        }
+                        if (obj.Has("lte")) {
+                            Napi::Value lte_val = obj.Get("lte");
+                            if (lte_val.IsBigInt()) lte = lte_val.As<Napi::BigInt>().Uint64Value(&lossless);
+                            else if (lte_val.IsNumber()) lte = lte_val.As<Napi::Number>().Int64Value();
+                        } else {
+                            lte = std::numeric_limits<uint64_t>::max();
+                        }
+                    }
+                } else if (val.IsBigInt()) {
+                    gte = lte = val.As<Napi::BigInt>().Uint64Value(&lossless);
+                } else {
+                    gte = lte = val.As<Napi::Number>().Int64Value();
+                }
+
+                to_binary_key_buf(gte, binary_buf_ptr, 8);
+                hex_dump("  gte_bytes", binary_buf_ptr, 8);
+                c_params.push_back({binary_buf_ptr, 8});
+                binary_buf_ptr += 8;
+
+                to_binary_key_buf(lte, binary_buf_ptr, 8);
+                hex_dump("  lte_bytes", binary_buf_ptr, 8);
+                c_params.push_back({binary_buf_ptr, 8});
+                binary_buf_ptr += 8;
+            } else if (val.IsString()) {
+                const std::string& str = param_storage[string_param_idx++];
+                c_params.push_back({str.c_str(), str.length()});
+            }
+        }
+        if (step.Get("op_type").As<Napi::String>().Utf8Value() == "traverse" && step.Has("filter")) {
+             Napi::Object filter_obj = step.Get("filter").As<Napi::Object>();
+             Napi::Array filter_keys = filter_obj.GetPropertyNames();
+             for (uint32_t j = 0; j < filter_keys.Length(); ++j) {
+                const std::string& key_str = param_storage[string_param_idx++];
+                c_params.push_back({key_str.c_str(), key_str.length()});
+                const std::string& val_str = param_storage[string_param_idx++];
+                c_params.push_back({val_str.c_str(), val_str.length()});
             }
         }
     }
     
     StaxResultSet rs_handle = staxdb_graph_execute_plan(graph_handle_, plan_id, c_params.data(), c_params.size());
     if (!rs_handle) {
+        printf("[N-API] ExecuteQuery returned NULL result set.\n");
         return env.Null();
     }
     if (rs_handle->result_type == GRAPH_ID_RESULT) {

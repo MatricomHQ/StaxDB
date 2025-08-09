@@ -28,8 +28,8 @@ uint32_t StaxTree::find_critical_bit(const char *s1_data, size_t len1, const cha
 #if defined(__SSE2__) || defined(_M_X64) || _M_IX86_FP >= 2
     for (; diff_byte_idx + 16 <= min_len; diff_byte_idx += 16)
     {
-        __m128i v1 = _mm_loadu_si128(reinterpret_cast<const __m128i *>(s1 + diff_byte_idx));
-        __m128i v2 = _mm_loadu_si128(reinterpret_cast<const __m128i *>(s2 + diff_byte_idx));
+        __m128i v1 = _mm_loadu_si128(reinterpret_cast<const __m128i *>(s1_data + diff_byte_idx));
+        __m128i v2 = _mm_loadu_si128(reinterpret_cast<const __m128i *>(s2_data + diff_byte_idx));
         int mask = _mm_movemask_epi8(_mm_cmpeq_epi8(v1, v2));
         if (mask != 0xFFFF)
         {
