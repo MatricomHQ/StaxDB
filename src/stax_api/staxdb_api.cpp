@@ -601,7 +601,9 @@ void staxdb_graph_update_fact_string(StaxGraph graph, uint32_t obj_id, StaxSlice
         GraphReader reader(graph->db_instance, read_ctx);
         std::string_view field_name_sv = to_string_view(field);
         auto old_value_opt = reader.get_property_for_object_string(obj_id, field_name_sv);
-        if (old_value_opt) txn.remove_fact(obj_id, field_name_sv, *old_value_opt);
+        if (old_value_opt) {
+            txn.remove_fact(obj_id, field_name_sv, *old_value_opt);
+        }
         txn.insert_fact_string(obj_id, field_name_sv, to_string_view(new_value));
         txn.commit();
     } catch (const std::exception& e) { set_last_error(e.what()); }
@@ -616,7 +618,9 @@ void staxdb_graph_update_fact_numeric(StaxGraph graph, uint32_t obj_id, StaxSlic
         GraphReader reader(graph->db_instance, read_ctx);
         std::string_view field_name_sv = to_string_view(field);
         auto old_value_opt = reader.get_property_for_object_numeric(obj_id, field_name_sv);
-        if (old_value_opt) txn.remove_fact_numeric(obj_id, field_name_sv, *old_value_opt);
+        if (old_value_opt) {
+            txn.remove_fact_numeric(obj_id, field_name_sv, *old_value_opt);
+        }
         txn.insert_fact_numeric(obj_id, field_name_sv, new_value);
         txn.commit();
     } catch (const std::exception& e) { set_last_error(e.what()); }

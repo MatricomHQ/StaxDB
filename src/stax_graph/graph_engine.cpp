@@ -680,20 +680,22 @@ void GraphTransaction::remove_fact(uint32_t obj_id, std::string_view field_name,
     if (is_finished_) throw std::runtime_error("GraphTransaction: Transaction already finished.");
     
     // OFV
-    char ofv_key_buf[BINARY_U32_SIZE + 1 + 1 + 1 + 256 + 1 + BINARY_U32_SIZE];
-    char* p = ofv_key_buf;
-    p += to_binary_key_buf(obj_id, p, sizeof(ofv_key_buf)); *p++ = KEY_SEPARATOR; *p++ = OFV_RELATIONSHIP_PREFIX; *p++ = KEY_SEPARATOR;
-    memcpy(p, field_name.data(), field_name.length()); p += field_name.length(); *p++ = KEY_SEPARATOR;
-    p += to_binary_key_buf(val_id, p, sizeof(ofv_key_buf) - (p - ofv_key_buf));
-    ofv_col_->remove(ctx_, ofv_batch_deltas_, std::string_view(ofv_key_buf, p - ofv_key_buf));
+    std::string ofv_key = to_binary_key(obj_id);
+    ofv_key += KEY_SEPARATOR;
+    ofv_key += OFV_RELATIONSHIP_PREFIX;
+    ofv_key += KEY_SEPARATOR;
+    ofv_key += field_name;
+    ofv_key += KEY_SEPARATOR;
+    ofv_key += to_binary_key(val_id);
+    ofv_col_->remove(ctx_, ofv_batch_deltas_, ofv_key);
 
     // FVO
-    char fvo_key_buf[256 + 1 + BINARY_U32_SIZE + 1 + BINARY_U32_SIZE];
-    p = fvo_key_buf;
-    memcpy(p, field_name.data(), field_name.length()); p += field_name.length(); *p++ = KEY_SEPARATOR;
-    p += to_binary_key_buf(val_id, p, sizeof(fvo_key_buf) - (p - fvo_key_buf)); *p++ = KEY_SEPARATOR;
-    p += to_binary_key_buf(obj_id, p, sizeof(fvo_key_buf) - (p - fvo_key_buf));
-    fvo_col_->remove(ctx_, fvo_batch_deltas_, std::string_view(fvo_key_buf, p - fvo_key_buf));
+    std::string fvo_key = std::string(field_name);
+    fvo_key += KEY_SEPARATOR;
+    fvo_key += to_binary_key(val_id);
+    fvo_key += KEY_SEPARATOR;
+    fvo_key += to_binary_key(obj_id);
+    fvo_col_->remove(ctx_, fvo_batch_deltas_, fvo_key);
     
     has_writes_ = true;
 }
@@ -701,19 +703,20 @@ void GraphTransaction::remove_fact(uint32_t obj_id, std::string_view field_name,
     if (is_finished_) throw std::runtime_error("GraphTransaction: Transaction already finished.");
 
     // OFV
-    char ofv_key_buf[BINARY_U32_SIZE + 1 + 1 + 1 + 256];
-    char* p = ofv_key_buf;
-    p += to_binary_key_buf(obj_id, p, sizeof(ofv_key_buf)); *p++ = KEY_SEPARATOR; *p++ = OFV_PROPERTY_PREFIX; *p++ = KEY_SEPARATOR;
-    memcpy(p, field_name.data(), field_name.length()); p += field_name.length();
-    ofv_col_->remove(ctx_, ofv_batch_deltas_, std::string_view(ofv_key_buf, p - ofv_key_buf));
+    std::string ofv_key = to_binary_key(obj_id);
+    ofv_key += KEY_SEPARATOR;
+    ofv_key += OFV_PROPERTY_PREFIX;
+    ofv_key += KEY_SEPARATOR;
+    ofv_key += field_name;
+    ofv_col_->remove(ctx_, ofv_batch_deltas_, ofv_key);
 
     // FVO
-    char fvo_key_buf[256 + 1 + 4096 + 1 + BINARY_U32_SIZE];
-    p = fvo_key_buf;
-    memcpy(p, field_name.data(), field_name.length()); p += field_name.length(); *p++ = KEY_SEPARATOR;
-    memcpy(p, value_str.data(), value_str.length()); p += value_str.length(); *p++ = KEY_SEPARATOR;
-    p += to_binary_key_buf(obj_id, p, sizeof(fvo_key_buf) - (p - fvo_key_buf));
-    fvo_col_->remove(ctx_, fvo_batch_deltas_, std::string_view(fvo_key_buf, p - fvo_key_buf));
+    std::string fvo_key = std::string(field_name);
+    fvo_key += KEY_SEPARATOR;
+    fvo_key += value_str;
+    fvo_key += KEY_SEPARATOR;
+    fvo_key += to_binary_key(obj_id);
+    fvo_col_->remove(ctx_, fvo_batch_deltas_, fvo_key);
 
     has_writes_ = true;
 }
@@ -721,19 +724,20 @@ void GraphTransaction::remove_fact_numeric(uint32_t obj_id, std::string_view fie
     if (is_finished_) throw std::runtime_error("GraphTransaction: Transaction already finished.");
 
     // OFV
-    char ofv_key_buf[BINARY_U32_SIZE + 1 + 1 + 1 + 256];
-    char* p = ofv_key_buf;
-    p += to_binary_key_buf(obj_id, p, sizeof(ofv_key_buf)); *p++ = KEY_SEPARATOR; *p++ = OFV_PROPERTY_PREFIX; *p++ = KEY_SEPARATOR;
-    memcpy(p, field_name.data(), field_name.length()); p += field_name.length();
-    ofv_col_->remove(ctx_, ofv_batch_deltas_, std::string_view(ofv_key_buf, p - ofv_key_buf));
+    std::string ofv_key = to_binary_key(obj_id);
+    ofv_key += KEY_SEPARATOR;
+    ofv_key += OFV_PROPERTY_PREFIX;
+    ofv_key += KEY_SEPARATOR;
+    ofv_key += field_name;
+    ofv_col_->remove(ctx_, ofv_batch_deltas_, ofv_key);
 
     // FVO
-    char fvo_key_buf[256 + 1 + BINARY_U64_SIZE + 1 + BINARY_U32_SIZE];
-    p = fvo_key_buf;
-    memcpy(p, field_name.data(), field_name.length()); p += field_name.length(); *p++ = KEY_SEPARATOR;
-    p += to_binary_key_buf(numeric_val, p, sizeof(fvo_key_buf) - (p-fvo_key_buf)); *p++ = KEY_SEPARATOR;
-    p += to_binary_key_buf(obj_id, p, sizeof(fvo_key_buf) - (p - fvo_key_buf));
-    fvo_col_->remove(ctx_, fvo_batch_deltas_, std::string_view(fvo_key_buf, p - fvo_key_buf));
+    std::string fvo_key = std::string(field_name);
+    fvo_key += KEY_SEPARATOR;
+    fvo_key += to_binary_key(numeric_val);
+    fvo_key += KEY_SEPARATOR;
+    fvo_key += to_binary_key(obj_id);
+    fvo_col_->remove(ctx_, fvo_batch_deltas_, fvo_key);
     
     has_writes_ = true;
 }
