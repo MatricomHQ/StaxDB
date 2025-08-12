@@ -72,6 +72,9 @@ private:
     Napi::Value InsertObject(const Napi::CallbackInfo& info);
     void UpdateObject(const Napi::CallbackInfo& info);
     Napi::Value BeginTransaction(const Napi::CallbackInfo& info);
+
+    // Helper function for safe JS object to C++ property conversion
+    static void convert_js_obj_to_properties(Napi::Env env, Napi::Object data_obj, std::vector<StaxObjectProperty>& c_properties, std::vector<char>& string_buffer);
 };
 
 

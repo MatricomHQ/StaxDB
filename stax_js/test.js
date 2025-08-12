@@ -34,6 +34,7 @@ async function runAllTests() {
         await testAdvancedFluentQueries(db);
         await testAsyncIterator(db);
         await testTransactions(db);
+        await testLargeStringIntegrity(db); // <-- ADDED NEW TEST CASE
         await testDeletionIntegrity();
         await testApplicationDataIntegrity(db); 
 
@@ -604,6 +605,48 @@ async function testTransactions(db) {
         console.log('      ... PASSED');
     }
 }
+
+async function testLargeStringIntegrity(db) {
+    console.log('\n--- SCENARIO: Large String Integrity (Bug Fix Verification) ---');
+    const graph = db.getGraph();
+    let resultSetsToClose = [];
+
+    try {
+        const TRUNCATION_BUG_LIMIT = 10973;
+        const LARGE_STRING_SIZE = TRUNCATION_BUG_LIMIT + 20000; // Significantly larger
+        const largeString = 'A'.repeat(LARGE_STRING_SIZE);
+        const testId = 'large-string-test-1';
+
+        console.log(`  - Inserting object with a large string of size: ${LARGE_STRING_SIZE} bytes.`);
+        const objectId = graph.insertObject({
+            type: 'large_string_test',
+            testId: testId,
+            data: largeString,
+        });
+        graph.commit();
+        console.log(`    ... Inserted with internal ID: ${objectId}`);
+        
+        console.log('  - Reading object back immediately to verify integrity...');
+        const resultSet = graph.query().find({ testId: testId }).execute();
+        resultSetsToClose.push(resultSet);
+        
+        const results = resultSet.getPage(1, 1).results;
+        
+        assert.strictEqual(results.length, 1, `FAIL: Expected to find 1 object, but found ${results.length}.`);
+        
+        const retrievedObject = results[0];
+        const retrievedString = retrievedObject.data;
+        
+        console.log(`    ... Retrieved string of size: ${retrievedString.length} bytes.`);
+        
+        assert.strictEqual(retrievedString.length, LARGE_STRING_SIZE, `FAIL: String was truncated! Expected ${LARGE_STRING_SIZE}, got ${retrievedString.length}.`);
+        console.log('    ... PASSED: Retrieved string length matches original length.');
+
+    } finally {
+        for(const rs of resultSetsToClose) { if(rs) rs.close(); }
+    }
+}
+
 
 async function testDeletionIntegrity() {
     console.log('\n--- SCENARIO: Deletion Integrity ---');

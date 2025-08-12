@@ -273,29 +273,56 @@ void GraphWrap::DeleteObject(const Napi::CallbackInfo& info) {
     staxdb_graph_delete_object(graph_handle_, obj_id);
 }
 
-
-
-static void convert_js_obj_to_properties(Napi::Env env, Napi::Object data_obj, std::vector<StaxObjectProperty>& c_properties, std::vector<std::string>& string_storage) {
+// Memory-safe object conversion function
+void GraphWrap::convert_js_obj_to_properties(Napi::Env env, Napi::Object data_obj, std::vector<StaxObjectProperty>& c_properties, std::vector<char>& string_buffer) {
     Napi::Array property_names = data_obj.GetPropertyNames();
     uint32_t num_properties = property_names.Length();
     c_properties.reserve(num_properties);
-    string_storage.reserve(num_properties * 2);
 
+    // Pass 1: Calculate total size for string buffer
+    size_t total_string_size = 0;
     for (uint32_t i = 0; i < num_properties; ++i) {
         Napi::Value key_val = property_names.Get(i);
-        string_storage.push_back(key_val.As<Napi::String>());
-        const std::string& field = string_storage.back();
-
-        if (field == "__stax_id") continue;
+        Napi::String key_napi_str = key_val.As<Napi::String>();
+        std::string key_str = key_napi_str;
+        if (key_str == "__stax_id") continue;
+        
+        size_t key_len = 0;
+        napi_get_value_string_utf8(env, key_napi_str, nullptr, 0, &key_len);
+        total_string_size += key_len + 1;
 
         Napi::Value value_val = data_obj.Get(key_val);
+        if (value_val.IsString()) {
+            size_t val_len = 0;
+            napi_get_value_string_utf8(env, value_val, nullptr, 0, &val_len);
+            total_string_size += val_len + 1;
+        }
+    }
+    string_buffer.resize(total_string_size);
+    char* buffer_ptr = string_buffer.data();
+
+    // Pass 2: Populate properties and buffer
+    for (uint32_t i = 0; i < num_properties; ++i) {
+        Napi::Value key_val = property_names.Get(i);
+        Napi::String key_napi_str = key_val.As<Napi::String>();
+        std::string field_str = key_napi_str;
+        if (field_str == "__stax_id") continue;
+
         StaxObjectProperty prop = {};
-        prop.field = { field.c_str(), field.length() };
+        
+        size_t key_bytes_written = 0;
+        napi_get_value_string_utf8(env, key_napi_str, buffer_ptr, string_buffer.size() - (buffer_ptr - string_buffer.data()), &key_bytes_written);
+        prop.field = { buffer_ptr, key_bytes_written };
+        buffer_ptr += key_bytes_written + 1;
+
+        Napi::Value value_val = data_obj.Get(key_val);
 
         if (value_val.IsString()) {
             prop.type = STAX_PROP_STRING;
-            string_storage.push_back(value_val.As<Napi::String>());
-            prop.value.string_val = { string_storage.back().c_str(), string_storage.back().length() };
+            size_t val_bytes_written = 0;
+            napi_get_value_string_utf8(env, value_val, buffer_ptr, string_buffer.size() - (buffer_ptr - string_buffer.data()), &val_bytes_written);
+            prop.value.string_val = { buffer_ptr, val_bytes_written };
+            buffer_ptr += val_bytes_written + 1;
         } else if (value_val.IsNumber()) {
             prop.type = STAX_PROP_NUMERIC;
             prop.value.numeric_val = static_cast<uint64_t>(value_val.As<Napi::Number>().Int64Value());
@@ -328,8 +355,8 @@ Napi::Value GraphWrap::InsertObject(const Napi::CallbackInfo& info) {
 
     try {
         std::vector<StaxObjectProperty> c_properties;
-        std::vector<std::string> string_storage;
-        convert_js_obj_to_properties(env, data_obj, c_properties, string_storage);
+        std::vector<char> string_buffer;
+        convert_js_obj_to_properties(env, data_obj, c_properties, string_buffer);
 
         uint32_t new_id = 0;
         if (!c_properties.empty()) {
@@ -355,8 +382,8 @@ void GraphWrap::UpdateObject(const Napi::CallbackInfo& info) {
 
     try {
         std::vector<StaxObjectProperty> c_properties;
-        std::vector<std::string> string_storage;
-        convert_js_obj_to_properties(env, data_obj, c_properties, string_storage);
+        std::vector<char> string_buffer;
+        convert_js_obj_to_properties(env, data_obj, c_properties, string_buffer);
 
         staxdb_graph_update_object(graph_handle_, obj_id, c_properties.data(), c_properties.size());
         
