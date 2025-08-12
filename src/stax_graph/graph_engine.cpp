@@ -570,105 +570,79 @@ void GraphTransaction::track_relationship_field(std::string_view field_name) { s
 
 void GraphTransaction::insert_fact(uint32_t obj_id, std::string_view field_name, uint32_t val_id) {
     if (is_finished_) throw std::runtime_error("GraphTransaction: Transaction already finished.");
-    if (ofv_kv_pairs_count_ >= GRAPH_BATCH_FLUSH_THRESHOLD_KVS || fvo_kv_pairs_count_ >= GRAPH_BATCH_FLUSH_THRESHOLD_KVS) flush_pending_writes();
     track_relationship_field(field_name);
     
     // OFV
-    size_t ofv_key_len = BINARY_U32_SIZE + 1 + 1 + 1 + field_name.length() + 1 + BINARY_U32_SIZE;
-    if (ofv_data_offset_ + ofv_key_len > MAX_BATCH_KEY_DATA_SIZE) flush_pending_writes();
-    char* ofv_key_ptr = ofv_kv_data_buffer_.get() + ofv_data_offset_;
-    char* p = ofv_key_ptr;
-    p += to_binary_key_buf(obj_id, p, BINARY_U32_SIZE); *p++ = KEY_SEPARATOR; *p++ = OFV_RELATIONSHIP_PREFIX; *p++ = KEY_SEPARATOR;
-    memcpy(p, field_name.data(), field_name.length()); p += field_name.length();
-    *p++ = KEY_SEPARATOR;
-    p += to_binary_key_buf(val_id, p, BINARY_U32_SIZE);
-    ofv_kv_pairs_array_[ofv_kv_pairs_count_].key = {ofv_key_ptr, (size_t)(p - ofv_key_ptr)};
-    ofv_kv_pairs_array_[ofv_kv_pairs_count_++].value = {&FVO_PLACEHOLDER_VALUE, 1};
-    ofv_data_offset_ += (p - ofv_key_ptr);
-    
+    std::string ofv_key = to_binary_key(obj_id);
+    ofv_key += KEY_SEPARATOR;
+    ofv_key += OFV_RELATIONSHIP_PREFIX;
+    ofv_key += KEY_SEPARATOR;
+    ofv_key += field_name;
+    ofv_key += KEY_SEPARATOR;
+    ofv_key += to_binary_key(val_id);
+    ofv_col_->insert(ctx_, ofv_batch_deltas_, ofv_key, std::string_view(&FVO_PLACEHOLDER_VALUE, 1));
+
     // FVO
-    size_t fvo_key_len = field_name.length() + 1 + BINARY_U32_SIZE + 1 + BINARY_U32_SIZE;
-    if (fvo_data_offset_ + fvo_key_len > MAX_BATCH_KEY_DATA_SIZE) flush_pending_writes();
-    char* fvo_key_ptr = fvo_kv_data_buffer_.get() + fvo_data_offset_;
-    p = fvo_key_ptr;
-    memcpy(p, field_name.data(), field_name.length()); p += field_name.length();
-    *p++ = KEY_SEPARATOR;
-    p += to_binary_key_buf(val_id, p, BINARY_U32_SIZE); *p++ = KEY_SEPARATOR;
-    p += to_binary_key_buf(obj_id, p, BINARY_U32_SIZE);
-    fvo_kv_pairs_array_[fvo_kv_pairs_count_].key = {fvo_key_ptr, (size_t)(p - fvo_key_ptr)};
-    fvo_kv_pairs_array_[fvo_kv_pairs_count_++].value = {&FVO_PLACEHOLDER_VALUE, 1};
-    fvo_data_offset_ += (p - fvo_key_ptr);
+    std::string fvo_key = std::string(field_name);
+    fvo_key += KEY_SEPARATOR;
+    fvo_key += to_binary_key(val_id);
+    fvo_key += KEY_SEPARATOR;
+    fvo_key += to_binary_key(obj_id);
+    fvo_col_->insert(ctx_, fvo_batch_deltas_, fvo_key, std::string_view(&FVO_PLACEHOLDER_VALUE, 1));
 
     has_writes_ = true;
 }
 
 void GraphTransaction::insert_fact_string(uint32_t obj_id, std::string_view field_name, std::string_view value_str) {
     if (is_finished_) throw std::runtime_error("GraphTransaction: Transaction already finished.");
-    if (ofv_kv_pairs_count_ >= GRAPH_BATCH_FLUSH_THRESHOLD_KVS || fvo_kv_pairs_count_ >= GRAPH_BATCH_FLUSH_THRESHOLD_KVS) flush_pending_writes();
 
     // OFV
-    size_t ofv_key_len = BINARY_U32_SIZE + 1 + 1 + 1 + field_name.length();
-    size_t ofv_val_len = 1 + value_str.length();
-    if (ofv_data_offset_ + ofv_key_len + ofv_val_len > MAX_BATCH_KEY_DATA_SIZE) flush_pending_writes();
-    char* buf_ptr = ofv_kv_data_buffer_.get() + ofv_data_offset_;
-    char* p = buf_ptr;
-    p += to_binary_key_buf(obj_id, p, BINARY_U32_SIZE); *p++ = KEY_SEPARATOR; *p++ = OFV_PROPERTY_PREFIX; *p++ = KEY_SEPARATOR;
-    memcpy(p, field_name.data(), field_name.length()); p += field_name.length();
-    ofv_kv_pairs_array_[ofv_kv_pairs_count_].key = {buf_ptr, (size_t)(p - buf_ptr)};
-    char* val_ptr = p;
-    *p++ = StaxValueType::String;
-    memcpy(p, value_str.data(), value_str.length()); p += value_str.length();
-    ofv_kv_pairs_array_[ofv_kv_pairs_count_++].value = {val_ptr, (size_t)(p - val_ptr)};
-    ofv_data_offset_ += (p - buf_ptr);
+    std::string ofv_key = to_binary_key(obj_id);
+    ofv_key += KEY_SEPARATOR;
+    ofv_key += OFV_PROPERTY_PREFIX;
+    ofv_key += KEY_SEPARATOR;
+    ofv_key += field_name;
+    
+    std::string ofv_val;
+    ofv_val.reserve(1 + value_str.length());
+    ofv_val += StaxValueType::String;
+    ofv_val += value_str;
+    ofv_col_->insert(ctx_, ofv_batch_deltas_, ofv_key, ofv_val);
 
     // FVO
-    size_t fvo_key_len = field_name.length() + 1 + value_str.length() + 1 + BINARY_U32_SIZE;
-    if (fvo_data_offset_ + fvo_key_len > MAX_BATCH_KEY_DATA_SIZE) flush_pending_writes();
-    char* fvo_key_ptr = fvo_kv_data_buffer_.get() + fvo_data_offset_;
-    p = fvo_key_ptr;
-    memcpy(p, field_name.data(), field_name.length()); p += field_name.length();
-    *p++ = KEY_SEPARATOR;
-    memcpy(p, value_str.data(), value_str.length()); p += value_str.length();
-    *p++ = KEY_SEPARATOR;
-    p += to_binary_key_buf(obj_id, p, BINARY_U32_SIZE);
-    fvo_kv_pairs_array_[fvo_kv_pairs_count_].key = {fvo_key_ptr, (size_t)(p - fvo_key_ptr)};
-    fvo_kv_pairs_array_[fvo_kv_pairs_count_++].value = {&FVO_PLACEHOLDER_VALUE, 1};
-    fvo_data_offset_ += (p - fvo_key_ptr);
+    std::string fvo_key = std::string(field_name);
+    fvo_key += KEY_SEPARATOR;
+    fvo_key += value_str;
+    fvo_key += KEY_SEPARATOR;
+    fvo_key += to_binary_key(obj_id);
+    fvo_col_->insert(ctx_, fvo_batch_deltas_, fvo_key, std::string_view(&FVO_PLACEHOLDER_VALUE, 1));
 
     has_writes_ = true;
 }
 
 void GraphTransaction::insert_fact_numeric(uint32_t obj_id, std::string_view field_name, uint64_t numeric_val) {
     if (is_finished_) throw std::runtime_error("GraphTransaction: Transaction already finished.");
-    if (ofv_kv_pairs_count_ >= GRAPH_BATCH_FLUSH_THRESHOLD_KVS || fvo_kv_pairs_count_ >= GRAPH_BATCH_FLUSH_THRESHOLD_KVS) flush_pending_writes();
 
     // OFV
-    size_t ofv_key_len = BINARY_U32_SIZE + 1 + 1 + 1 + field_name.length();
-    size_t ofv_val_len = 1 + BINARY_U64_SIZE;
-    if (ofv_data_offset_ + ofv_key_len + ofv_val_len > MAX_BATCH_KEY_DATA_SIZE) flush_pending_writes();
-    char* buf_ptr = ofv_kv_data_buffer_.get() + ofv_data_offset_;
-    char* p = buf_ptr;
-    p += to_binary_key_buf(obj_id, p, BINARY_U32_SIZE); *p++ = KEY_SEPARATOR; *p++ = OFV_PROPERTY_PREFIX; *p++ = KEY_SEPARATOR;
-    memcpy(p, field_name.data(), field_name.length()); p += field_name.length();
-    ofv_kv_pairs_array_[ofv_kv_pairs_count_].key = {buf_ptr, (size_t)(p - buf_ptr)};
-    char* val_ptr = p;
-    *p++ = StaxValueType::Numeric;
-    p += to_binary_key_buf(numeric_val, p, BINARY_U64_SIZE);
-    ofv_kv_pairs_array_[ofv_kv_pairs_count_++].value = {val_ptr, (size_t)(p - val_ptr)};
-    ofv_data_offset_ += (p - buf_ptr);
+    std::string ofv_key = to_binary_key(obj_id);
+    ofv_key += KEY_SEPARATOR;
+    ofv_key += OFV_PROPERTY_PREFIX;
+    ofv_key += KEY_SEPARATOR;
+    ofv_key += field_name;
+
+    std::string ofv_val;
+    ofv_val.reserve(1 + BINARY_U64_SIZE);
+    ofv_val += StaxValueType::Numeric;
+    ofv_val += to_binary_key(numeric_val);
+    ofv_col_->insert(ctx_, ofv_batch_deltas_, ofv_key, ofv_val);
     
     // FVO
-    size_t fvo_key_len = field_name.length() + 1 + BINARY_U64_SIZE + 1 + BINARY_U32_SIZE;
-    if (fvo_data_offset_ + fvo_key_len > MAX_BATCH_KEY_DATA_SIZE) flush_pending_writes();
-    char* fvo_key_ptr = fvo_kv_data_buffer_.get() + fvo_data_offset_;
-    p = fvo_key_ptr;
-    memcpy(p, field_name.data(), field_name.length()); p += field_name.length();
-    *p++ = KEY_SEPARATOR;
-    p += to_binary_key_buf(numeric_val, p, BINARY_U64_SIZE); *p++ = KEY_SEPARATOR;
-    p += to_binary_key_buf(obj_id, p, BINARY_U32_SIZE);
-    fvo_kv_pairs_array_[fvo_kv_pairs_count_].key = {fvo_key_ptr, (size_t)(p - fvo_key_ptr)};
-    fvo_kv_pairs_array_[fvo_kv_pairs_count_++].value = {&FVO_PLACEHOLDER_VALUE, 1};
-    fvo_data_offset_ += (p - fvo_key_ptr);
+    std::string fvo_key = std::string(field_name);
+    fvo_key += KEY_SEPARATOR;
+    fvo_key += to_binary_key(numeric_val);
+    fvo_key += KEY_SEPARATOR;
+    fvo_key += to_binary_key(obj_id);
+    fvo_col_->insert(ctx_, fvo_batch_deltas_, fvo_key, std::string_view(&FVO_PLACEHOLDER_VALUE, 1));
 
     has_writes_ = true;
 }
