@@ -6,6 +6,7 @@
 #include <stdlib.h> 
 #include <vector>
 #include <string>
+#include <memory>
 
 #include "stax_common/common_types.hpp"
 
