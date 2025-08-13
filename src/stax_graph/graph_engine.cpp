@@ -177,14 +177,14 @@ std::vector<std::tuple<uint32_t, std::string, std::string>> GraphReader::get_pro
     return results;
 }
 
-std::vector<std::tuple<uint32_t, std::string, std::string>> GraphReader::get_properties_and_relationships(uint32_t obj_id)
+std::vector<std::tuple<uint32_t, std::string, std::string, StaxValueType>> GraphReader::get_properties_and_relationships(uint32_t obj_id)
 {
     char prefix_buf[GraphTransaction::BINARY_U32_SIZE + 1];
     size_t prefix_len = to_binary_key_buf(obj_id, prefix_buf, sizeof(prefix_buf));
     prefix_buf[prefix_len++] = KEY_SEPARATOR;
     std::string_view prefix(prefix_buf, prefix_len);
 
-    std::vector<std::tuple<uint32_t, std::string, std::string>> results;
+    std::vector<std::tuple<uint32_t, std::string, std::string, StaxValueType>> results;
 
     for (auto cursor = ofv_col_->seek(ctx_, prefix); cursor->is_valid() && cursor->key().starts_with(prefix); cursor->next())
     {
@@ -199,12 +199,12 @@ std::vector<std::tuple<uint32_t, std::string, std::string>> GraphReader::get_pro
         if (type_prefix == OFV_PROPERTY_PREFIX)
         {
             std::string field_name = std::string(rest_of_key);
-            char value_type = value_view_sv[0];
+            char value_type_char = value_view_sv[0];
             std::string_view value_data = value_view_sv.substr(1);
-            if (value_type == StaxValueType::String) {
-                results.emplace_back(obj_id, field_name, std::string(value_data));
-            } else if (value_type == StaxValueType::Numeric || value_type == StaxValueType::Geo) {
-                results.emplace_back(obj_id, field_name, std::to_string(from_binary_key_u64(value_data)));
+            if (value_type_char == StaxValueType::String) {
+                results.emplace_back(obj_id, field_name, std::string(value_data), StaxValueType::String);
+            } else if (value_type_char == StaxValueType::Numeric || value_type_char == StaxValueType::Geo) {
+                results.emplace_back(obj_id, field_name, std::to_string(from_binary_key_u64(value_data)), StaxValueType::Numeric);
             }
         }
         else if (type_prefix == OFV_RELATIONSHIP_PREFIX)
@@ -213,7 +213,7 @@ std::vector<std::tuple<uint32_t, std::string, std::string>> GraphReader::get_pro
             if (separator_pos != std::string_view::npos) {
                 std::string rel_name = std::string(rest_of_key.substr(0, separator_pos));
                 uint32_t target_id = from_binary_key_u32(rest_of_key.substr(separator_pos + 1));
-                results.emplace_back(obj_id, rel_name, std::to_string(target_id));
+                results.emplace_back(obj_id, rel_name, std::to_string(target_id), StaxValueType::Relationship);
             }
         }
     }
@@ -741,26 +741,25 @@ void GraphTransaction::clear_object_facts(uint32_t obj_id) {
     GraphReader reader(db_, ctx_);
     auto facts = reader.get_properties_and_relationships(obj_id);
     for (const auto& fact : facts) {
-        const auto& [subj, pred, obj_str] = fact;
+        const auto& [subj, pred, obj_str, type] = fact;
         
-        bool is_numeric = true;
-        for(char c : obj_str) {
-            if (!isdigit(c)) {
-                is_numeric = false;
+        switch(type) {
+            case StaxValueType::String:
+                remove_fact(subj, pred, obj_str);
+                break;
+            case StaxValueType::Numeric:
+            case StaxValueType::Geo: {
+                uint64_t val = std::stoull(obj_str);
+                remove_fact_numeric(subj, pred, val);
                 break;
             }
-        }
-        
-        if (is_numeric) {
-            uint64_t val = std::stoull(obj_str);
-            auto prop_val = reader.get_property_for_object_numeric(subj, pred);
-            if (prop_val && *prop_val == val) {
-                remove_fact_numeric(subj, pred, val);
-            } else {
-                remove_fact(subj, pred, (uint32_t)val);
+            case StaxValueType::Relationship: {
+                uint32_t val_id = static_cast<uint32_t>(std::stoul(obj_str));
+                remove_fact(subj, pred, val_id);
+                break;
             }
-        } else {
-            remove_fact(subj, pred, obj_str);
+            default:
+                break;
         }
     }
     has_writes_ = true;

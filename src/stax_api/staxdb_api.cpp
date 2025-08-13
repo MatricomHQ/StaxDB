@@ -20,6 +20,45 @@
 #include <cstdio> // For printf
 
 
+#if defined(_WIN32)
+#include <winsock2.h>
+#pragma comment(lib, "ws2_32.lib")
+#include <stdlib.h>
+#else
+#include <arpa/inet.h>
+#endif
+
+static uint64_t encode_geohash(double lat, double lon, int precision = 64) {
+    uint64_t geohash = 0;
+    double lat_min = -90.0, lat_max = 90.0;
+    double lon_min = -180.0, lon_max = 180.0;
+    bool is_lon = true;
+
+    for (int i = 0; i < precision; i++) {
+        geohash <<= 1;
+        if (is_lon) {
+            double mid = lon_min + (lon_max - lon_min) / 2.0;
+            if (lon > mid) {
+                geohash |= 1;
+                lon_min = mid;
+            } else {
+                lon_max = mid;
+            }
+        } else {
+            double mid = lat_min + (lat_max - lat_min) / 2.0;
+            if (lat > mid) {
+                geohash |= 1;
+                lat_min = mid;
+            } else {
+                lat_max = mid;
+            }
+        }
+        is_lon = !is_lon;
+    }
+    return geohash;
+}
+
+
 struct CompiledQueryStep {
     StaxGraphQueryOpType op_type;
     StaxGraphTraversalDirection direction;
@@ -37,17 +76,6 @@ struct StaxKVResultSetData_t {
     std::vector<char> data_buffer;
     std::vector<StaxKVPair> kv_pairs;
 };
-
-
-struct StaxDB_t {
-    std::unique_ptr<Database> db;
-};
-
-struct StaxGraph_t {
-    Database* db_instance;
-    std::vector<std::vector<CompiledQueryStep>> compiled_plans;
-};
-
 
 
 static thread_local std::string last_error_message;
@@ -422,7 +450,7 @@ StaxResultSet staxdb_graph_get_object(StaxGraph graph, uint32_t obj_id) {
 
 
         for (const auto& fact : all_facts) {
-            const auto& [subj, pred, obj] = fact;
+            const auto& [subj, pred, obj, type] = fact;
             key_offset = kv_data->data_buffer.size();
             kv_data->data_buffer.insert(kv_data->data_buffer.end(), pred.begin(), pred.end());
             val_offset = kv_data->data_buffer.size();

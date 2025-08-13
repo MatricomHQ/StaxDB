@@ -11,15 +11,23 @@
 #include <thread>
 #include <random>
 #include <iomanip>
+#include <filesystem>
 #include <set>
-#include "stax_common/roaring.h"
+#include <cassert>
+
+#if defined(_WIN32)
+#include <process.h>
+#else
+#include <unistd.h>
+#endif
 
 #include "stax_db/db.h"
 #include "stax_common/constants.h"
 #include "stax_tx/transaction.h"
 #include "stax_common/common_types.hpp"
 #include "stax_common/geohash.hpp"
-#include "stax_common/binary_utils.h" 
+#include "stax_common/binary_utils.h"
+#include "stax_common/roaring.h" // BUG FIX: Added missing include
 
 class GraphTransaction;
 class GraphReader;
@@ -100,7 +108,7 @@ public:
     GraphReader(::Database *db, const TxnContext &ctx);
 
     std::vector<std::tuple<uint32_t, std::string, std::string>> get_properties(uint32_t obj_id);
-    std::vector<std::tuple<uint32_t, std::string, std::string>> get_properties_and_relationships(uint32_t obj_id);
+    std::vector<std::tuple<uint32_t, std::string, std::string, StaxValueType>> get_properties_and_relationships(uint32_t obj_id);
     std::optional<std::string_view> get_property_for_object_string(uint32_t obj_id, std::string_view field_name);
     std::optional<uint64_t> get_property_for_object_numeric(uint32_t obj_id, std::string_view field_name);
     std::set<std::string> get_all_relationship_types();

@@ -1,9 +1,11 @@
 #pragma once
 
-#include <stdint.h>
+#include <cstdint>
 #include <stdbool.h>
 #include <stddef.h>
 #include <stdlib.h> 
+#include <vector>
+#include <string>
 
 #include "stax_common/common_types.hpp"
 
@@ -19,9 +21,16 @@ extern "C" {
 #endif
 
 
-struct StaxDB_t;
+struct StaxDB_t {
+    std::unique_ptr<Database> db;
+};
 typedef struct StaxDB_t* StaxDB;
-struct StaxGraph_t;
+
+struct CompiledQueryStep; 
+struct StaxGraph_t {
+    Database* db_instance;
+    std::vector<std::vector<CompiledQueryStep>> compiled_plans;
+};
 typedef struct StaxGraph_t* StaxGraph;
 
 
