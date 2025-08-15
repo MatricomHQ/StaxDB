@@ -1,19 +1,12 @@
 #pragma once
 
-#include <cstdint>
 #include <atomic>
+#include <cstdint>
 #include <stdexcept>
 #include <new>
-#include <limits>
-#include <vector>
-#include <array>
-#include <string>
 
 #include "stax_common/constants.h"
-#include "stax_common/common_types.hpp"
 #include "stax_db/arena_structs.h"
-
-class Database;
 
 #if defined(_MSC_VER)
 #define STAX_ALWAYS_INLINE __forceinline
@@ -23,78 +16,92 @@ class Database;
 #define STAX_ALWAYS_INLINE inline
 #endif
 
-class NodeAllocator
-{
+// =================================================================================================
+// --- StaxAllocator (Unified mmap Allocator) ---
+// =================================================================================================
+class StaxAllocator {
 private:
     FileHeader* file_header_ = nullptr;
     uint8_t *mmap_base_addr_ = nullptr;
 
-    static constexpr size_t NODES_PER_CHUNK = 512;
-    static constexpr size_t CHUNK_ALIGNMENT = 16384;
+public:
+    StaxAllocator(FileHeader* file_header, uint8_t* mmap_base_addr)
+        : file_header_(file_header), mmap_base_addr_(mmap_base_addr) {}
 
-    static constexpr size_t BIT_INDEX_ARRAY_BYTES = NODES_PER_CHUNK * sizeof(uint16_t);
-    static constexpr size_t CHILD_PTR_ARRAY_BYTES = NODES_PER_CHUNK * sizeof(uint64_t);
+    uint64_t allocate(size_t size, size_t alignment = 8) {
+        if (!file_header_) {
+            throw std::runtime_error("Cannot allocate chunk: file header is null.");
+        }
+        if ((alignment & (alignment - 1)) != 0) {
+            throw std::invalid_argument("Alignment must be a power of two.");
+        }
+        const uint64_t alignment_mask = alignment - 1;
+        uint64_t current_offset = file_header_->global_alloc_offset.load(std::memory_order_relaxed);
+        while (true) {
+            uint64_t aligned_offset = (current_offset + alignment_mask) & ~alignment_mask;
+            uint64_t next_offset = aligned_offset + size;
+            if (next_offset > DB_MAX_VIRTUAL_SIZE) {
+                throw std::runtime_error("Database out of space.");
+            }
+            if (file_header_->global_alloc_offset.compare_exchange_weak(
+                    current_offset, next_offset, std::memory_order_acq_rel,
+                    std::memory_order_relaxed)) {
+                return aligned_offset;
+            }
+        }
+    }
 
-    static constexpr size_t LEFT_CHILD_PTR_ARRAY_OFFSET = BIT_INDEX_ARRAY_BYTES;
-    static constexpr size_t RIGHT_CHILD_PTR_ARRAY_OFFSET = LEFT_CHILD_PTR_ARRAY_OFFSET + CHILD_PTR_ARRAY_BYTES;
-    static constexpr size_t CHUNK_USED_BYTES = RIGHT_CHILD_PTR_ARRAY_OFFSET + CHILD_PTR_ARRAY_BYTES;
+    void deallocate(uint64_t offset, size_t size) {
+        // No-op
+    }
 
-    struct ThreadLocalChunk
-    {
-        uint64_t chunk_base_offset_from_mmap = 0;
-        std::atomic<uint32_t> current_offset_nodes;
-    };
-    std::array<ThreadLocalChunk, MAX_CONCURRENT_THREADS> thread_chunks_;
+    template<typename T>
+    T* get_ptr(uint64_t offset) const {
+        if (!mmap_base_addr_ || offset == 0) {
+            return nullptr;
+        }
+        return reinterpret_cast<T*>(mmap_base_addr_ + offset);
+    }
+};
 
-    void request_new_chunk(size_t thread_id);
-    uint64_t allocate_data_chunk(size_t size_bytes, size_t alignment = 8);
+// --- NEW: ThreadLocalAllocator ---
+class ThreadLocalAllocator {
+private:
+    StaxAllocator& global_allocator_;
+    uint64_t arena_offset_ = 0;
+    uint64_t current_alloc_ptr_ = 0;
+    uint64_t arena_end_ptr_ = 0;
 
+    static constexpr size_t ARENA_SIZE = 64 * 1024; // 64KB arenas
+
+    void request_new_arena() {
+        arena_offset_ = global_allocator_.allocate(ARENA_SIZE, ARENA_SIZE); // Align arenas
+        current_alloc_ptr_ = arena_offset_;
+        arena_end_ptr_ = arena_offset_ + ARENA_SIZE;
+    }
 
 public:
-    static thread_local std::vector<uint64_t> thread_local_free_list;
-    static constexpr uint64_t NIL_INDEX = std::numeric_limits<uint64_t>::max();
-
-    NodeAllocator(FileHeader* file_header, uint8_t* mmap_base_addr);
-
-    uint64_t allocate(size_t thread_id);
-    void deallocate(uint64_t node_handle);
-
-    STAX_ALWAYS_INLINE uint16_t get_bit_index(uint64_t node_handle) const
-    {
-        const uint64_t chunk_base_offset = node_handle & ~(CHUNK_ALIGNMENT - 1);
-        const uint64_t offset_in_chunk = node_handle & (CHUNK_ALIGNMENT - 1);
-        const uint32_t node_index = static_cast<uint32_t>((offset_in_chunk - LEFT_CHILD_PTR_ARRAY_OFFSET) >> 3);
-        const uint64_t bit_index_offset = chunk_base_offset + (node_index * sizeof(uint16_t));
-        return *reinterpret_cast<uint16_t *>(mmap_base_addr_ + bit_index_offset);
+    ThreadLocalAllocator(StaxAllocator& global_allocator)
+        : global_allocator_(global_allocator) {
+        request_new_arena();
     }
 
-    STAX_ALWAYS_INLINE void set_bit_index(uint64_t node_handle, uint32_t val)
-    {
-        const uint64_t chunk_base_offset = node_handle & ~(CHUNK_ALIGNMENT - 1);
-        const uint64_t offset_in_chunk = node_handle & (CHUNK_ALIGNMENT - 1);
-        const uint32_t node_index = static_cast<uint32_t>((offset_in_chunk - LEFT_CHILD_PTR_ARRAY_OFFSET) >> 3);
-        const uint64_t bit_index_offset = chunk_base_offset + (node_index * sizeof(uint16_t));
-        *reinterpret_cast<uint16_t *>(mmap_base_addr_ + bit_index_offset) = static_cast<uint16_t>(val);
-    }
+    uint64_t allocate(size_t size, size_t alignment = 8) {
+        const uint64_t alignment_mask = alignment - 1;
+        uint64_t aligned_ptr = (current_alloc_ptr_ + alignment_mask) & ~alignment_mask;
 
-    STAX_ALWAYS_INLINE std::atomic<uint64_t> &get_left_child_ptr(uint64_t node_handle)
-    {
-        return *reinterpret_cast<std::atomic<uint64_t> *>(mmap_base_addr_ + node_handle);
-    }
+        if (aligned_ptr + size > arena_end_ptr_) {
+            if (size > ARENA_SIZE) {
+                return global_allocator_.allocate(size, alignment);
+            }
+            request_new_arena();
+            aligned_ptr = (current_alloc_ptr_ + alignment_mask) & ~alignment_mask;
+            if (aligned_ptr + size > arena_end_ptr_) {
+                return global_allocator_.allocate(size, alignment);
+            }
+        }
 
-    STAX_ALWAYS_INLINE std::atomic<uint64_t> &get_right_child_ptr(uint64_t node_handle)
-    {
-        return *reinterpret_cast<std::atomic<uint64_t> *>(mmap_base_addr_ + node_handle + CHILD_PTR_ARRAY_BYTES);
+        current_alloc_ptr_ = aligned_ptr + size;
+        return aligned_ptr;
     }
-
-    STAX_ALWAYS_INLINE const uint16_t *get_bit_index_ptr(uint64_t node_handle) const
-    {
-        const uint64_t chunk_base_offset = node_handle & ~(CHUNK_ALIGNMENT - 1);
-        const uint64_t offset_in_chunk = node_handle & (CHUNK_ALIGNMENT - 1);
-        const uint32_t node_index = static_cast<uint32_t>((offset_in_chunk - LEFT_CHILD_PTR_ARRAY_OFFSET) >> 3);
-        const uint64_t bit_index_offset = chunk_base_offset + (node_index * sizeof(uint16_t));
-        return reinterpret_cast<const uint16_t *>(mmap_base_addr_ + bit_index_offset);
-    }
-
-    size_t get_total_occupied_size() const;
 };

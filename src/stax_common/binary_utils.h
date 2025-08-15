@@ -103,3 +103,34 @@ inline std::string to_binary_key(uint64_t id)
 inline std::string_view to_string_view(StaxSlice s) {
     return std::string_view(s.data, s.len);
 }
+
+// Converts a uint64_t to a big-endian byte string for lexicographical ordering.
+inline std::string uint64_to_big_endian_str(uint64_t val) {
+    std::string s(8, '\0');
+    s[0] = (val >> 56) & 0xFF;
+    s[1] = (val >> 48) & 0xFF;
+    s[2] = (val >> 40) & 0xFF;
+    s[3] = (val >> 32) & 0xFF;
+    s[4] = (val >> 24) & 0xFF;
+    s[5] = (val >> 16) & 0xFF;
+    s[6] = (val >> 8) & 0xFF;
+    s[7] = val & 0xFF;
+    return s;
+}
+
+// Converts a big-endian byte string view back to a uint64_t.
+inline uint64_t big_endian_str_to_uint64(std::string_view s) {
+    if (s.length() != 8) {
+        throw std::invalid_argument("String view must be 8 bytes long for uint64_t conversion.");
+    }
+    uint64_t val = 0;
+    val |= static_cast<uint64_t>(static_cast<uint8_t>(s[0])) << 56;
+    val |= static_cast<uint64_t>(static_cast<uint8_t>(s[1])) << 48;
+    val |= static_cast<uint64_t>(static_cast<uint8_t>(s[2])) << 40;
+    val |= static_cast<uint64_t>(static_cast<uint8_t>(s[3])) << 32;
+    val |= static_cast<uint64_t>(static_cast<uint8_t>(s[4])) << 24;
+    val |= static_cast<uint64_t>(static_cast<uint8_t>(s[5])) << 16;
+    val |= static_cast<uint64_t>(static_cast<uint8_t>(s[6])) << 8;
+    val |= static_cast<uint64_t>(static_cast<uint8_t>(s[7]));
+    return val;
+}

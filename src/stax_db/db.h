@@ -13,7 +13,6 @@
 
 #include "stax_common/os_platform_tools.h"
 #include "stax_db/arena_structs.h"
-#include "stax_core/value_store.hpp"
 #include "stax_core/stax_tree.hpp"
 #include "stax_common/common_types.hpp"
 #include "stax_common/spin_locks.h"
@@ -22,9 +21,8 @@
 #include "stax_common/constants.h"
 
 class Database;
-class DBCursor;
 class Collection;
-class NodeAllocator;
+class StaxAllocator;
 
 namespace StaxStats
 {
@@ -59,10 +57,9 @@ struct DbGeneration
     OsFileHandleType lock_file_handle = INVALID_OS_FILE_HANDLE;
     FileHeader *file_header = nullptr;
 
-    std::unique_ptr<NodeAllocator> internal_node_allocator;
+    std::unique_ptr<StaxAllocator> internal_node_allocator;
 
     std::vector<std::unique_ptr<Collection>> owned_collections;
-    std::vector<std::unique_ptr<CollectionRecordAllocator>> owned_record_allocators;
 
     ~DbGeneration();
     void unmap_and_close();
@@ -73,37 +70,33 @@ class Collection
 {
 public:
     uint32_t get_id() const { return collection_idx_; }
-    StaxTree &get_critbit_tree() { return *critbit_tree_; }
-    const StaxTree &get_critbit_tree() const { return *critbit_tree_; }
+    StaxTree16 &get_critbit_tree() { return *critbit_tree_; }
+    const StaxTree16 &get_critbit_tree() const { return *critbit_tree_; }
 
-    Collection(Database *parent_db, DbGeneration *owning_generation, uint32_t collection_idx, CollectionRecordAllocator &record_allocator);
+    Collection(Database *parent_db, DbGeneration *owning_generation, uint32_t collection_idx);
 
     TxnContext begin_transaction_context(size_t thread_id, bool is_read_only = false);
-    void commit(const TxnContext &ctx, TransactionBatch &batch);
+    void commit(const TxnContext &ctx);
     void abort(const TxnContext &ctx);
 
-    void insert(const TxnContext &ctx, TransactionBatch &batch, std::string_view key, std::string_view value);
-    void remove(const TxnContext &ctx, TransactionBatch &batch, std::string_view key);
-    std::optional<RecordData> get(const TxnContext &ctx, std::string_view key);
+    void insert(const TxnContext &ctx, std::string_view key, std::string_view value);
+    void remove(const TxnContext &ctx, std::string_view key);
+    StaxRecord* get(const TxnContext &ctx, std::string_view key);
 
     void insert_sync_direct(std::string_view key, std::string_view value, size_t thread_id);
     void remove_sync_direct(std::string_view key, size_t thread_id);
 
-    std::unique_ptr<DBCursor> seek(const TxnContext &ctx, std::string_view start_key, std::optional<std::string_view> end_key = std::nullopt);
-    std::unique_ptr<DBCursor> seek_first(const TxnContext &ctx, std::optional<std::string_view> end_key = std::nullopt);
-    std::unique_ptr<DBCursor> seek_raw(const TxnContext &ctx, std::string_view start_key, std::optional<std::string_view> end_key = std::nullopt);
+    std::vector<StaxRecord*> range(const TxnContext &ctx, std::string_view prefix);
+    std::vector<StaxRecord*> range(const TxnContext &ctx, std::string_view prefix, uint64_t start_ts, uint64_t end_ts);
 
 private:
     friend class Database;
-    friend class DBCursor;
-    friend class MergedCursorImpl;
 
     Database *parent_db_;
     DbGeneration *owning_generation_;
     uint32_t collection_idx_;
 
-    std::unique_ptr<StaxTree> critbit_tree_;
-    CollectionRecordAllocator *record_allocator_;
+    std::unique_ptr<StaxTree16> critbit_tree_;
 };
 
 enum class DurabilityLevel
@@ -128,7 +121,7 @@ public:
     Collection *get_fvo_collection();
 
     TxnContext begin_transaction_context(size_t thread_id, bool is_read_only = false);
-    void commit(const TxnContext &ctx, uint32_t collection_idx, const TransactionBatch &batch);
+    void commit(const TxnContext &ctx, uint32_t collection_idx);
     void abort(const TxnContext &ctx);
 
     const std::filesystem::path &get_db_path() const;
@@ -145,6 +138,8 @@ public:
     TxnID get_last_committed_txn_id() const;
     TxnID get_next_txn_id();
 
+    StaxAllocator* get_global_allocator();
+
 public:
     Database(const std::filesystem::path &base_dir, size_t num_threads, DurabilityLevel level);
 
@@ -155,10 +150,7 @@ public:
 private:
     friend class Collection;
     friend class StaxStats::DatabaseStatisticsCollector;
-    friend class MergedCursorImpl;
-    friend class DBCursor;
     friend class NodeAllocator;
-    friend class CollectionRecordAllocator;
 
     static uint64_t hash_name(std::string_view name);
 

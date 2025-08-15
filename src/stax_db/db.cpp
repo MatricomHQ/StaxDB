@@ -1,7 +1,6 @@
 #include "stax_db/db.h"
 #include "stax_common/os_file_extensions.h"
 #include "stax_tx/transaction.h"
-#include "stax_tx/db_cursor.hpp"
 #include "stax_graph/graph_engine.h"
 #include "stax_db/statistics.h"
 #include <stdexcept>
@@ -26,7 +25,6 @@ DbGeneration::~DbGeneration()
 void DbGeneration::unmap_and_close()
 {
     owned_collections.clear();
-    owned_record_allocators.clear();
     internal_node_allocator.reset();
 
     if (file_header && mmap_base)
@@ -58,296 +56,6 @@ CollectionEntry &DbGeneration::get_collection_entry_ref(uint32_t idx) const
         throw std::out_of_range("Collection index out of bounds for on-disk array.");
     }
     return *reinterpret_cast<CollectionEntry *>(mmap_base + file_header->collection_array_offset + (idx * sizeof(CollectionEntry)));
-}
-
-MergedCursorImpl::MergedCursorImpl(Database *db, const TxnContext &ctx, uint32_t collection_idx, std::string_view start_key_view, std::optional<std::string_view> end_key)
-    : db_(db), ctx_(ctx)
-{
-    if (end_key)
-    {
-        has_end_key_ = true;
-        end_key_buffer_ = std::string(*end_key);
-        end_key_view_ = end_key_buffer_;
-    }
-
-    const auto &generations = db_->get_generations();
-    for (size_t i = 0; i < generations.size(); ++i)
-    {
-        if (collection_idx < generations[i]->owned_collections.size() && generations[i]->owned_collections[collection_idx])
-        {
-            Collection &col = *generations[i]->owned_collections[collection_idx];
-            DBCursor generation_cursor(db, ctx, &col.get_critbit_tree(), start_key_view, end_key, false);
-            if (generation_cursor.is_valid())
-            {
-                pq_.push({std::move(generation_cursor), i});
-            }
-        }
-    }
-    advance();
-}
-
-void MergedCursorImpl::advance()
-{
-    while (true)
-    {
-        if (pq_.empty())
-        {
-            is_valid_ = false;
-            return;
-        }
-
-        MergeCursorState top_state = std::move(const_cast<MergeCursorState &>(pq_.top()));
-        pq_.pop();
-        std::string_view candidate_key = top_state.cursor.key();
-
-        if (has_end_key_ && candidate_key >= end_key_view_)
-        {
-            is_valid_ = false;
-            return;
-        }
-
-        std::vector<MergeCursorState> candidate_versions;
-        candidate_versions.push_back(std::move(top_state));
-
-        while (!pq_.empty() && pq_.top().cursor.key() == candidate_key)
-        {
-            candidate_versions.push_back(std::move(const_cast<MergeCursorState &>(pq_.top())));
-            pq_.pop();
-        }
-
-        RecordData best_visible_record;
-        TxnID best_visible_txn_id = 0;
-
-        for (auto &candidate : candidate_versions)
-        {
-            StaxTree *tree_ptr = candidate.cursor.tree_;
-            RecordData current_record_to_check = candidate.cursor.current_record_data_;
-
-            while (true)
-            {
-                if (current_record_to_check.txn_id <= ctx_.read_snapshot_id)
-                {
-                    if (current_record_to_check.txn_id > best_visible_txn_id)
-                    {
-                        best_visible_txn_id = current_record_to_check.txn_id;
-                        best_visible_record = current_record_to_check;
-                    }
-                    break;
-                }
-                if (current_record_to_check.prev_version_rel_offset == CollectionRecordAllocator::NIL_RECORD_OFFSET)
-                {
-                    break;
-                }
-                current_record_to_check = tree_ptr->get_record_data_by_offset(current_record_to_check.prev_version_rel_offset);
-            }
-
-            candidate.cursor.next();
-            if (candidate.cursor.is_valid())
-            {
-                pq_.push(std::move(candidate));
-            }
-        }
-
-        if (best_visible_txn_id > 0 && !best_visible_record.is_deleted)
-        {
-            is_valid_ = true;
-            last_key_buffer_.assign(best_visible_record.key_view());
-            last_key_view_ = last_key_buffer_;
-            current_record_data_ = best_visible_record;
-            return;
-        }
-    }
-}
-
-DBCursor::DBCursor() : impl_(nullptr), ctx_(inert_context) {}
-
-DBCursor::DBCursor(Database *db, const TxnContext &ctx, uint32_t collection_idx, std::string_view start_key, std::optional<std::string_view> end_key)
-    : impl_(std::make_unique<MergedCursorImpl>(db, ctx, collection_idx, start_key, end_key)), ctx_(ctx) {}
-
-DBCursor::DBCursor(Database *db, const TxnContext &ctx, StaxTree *tree, std::optional<std::string_view> end_key, bool raw_mode)
-    : db_(db), ctx_(ctx), tree_(tree), is_valid_(false), raw_mode_(raw_mode)
-{
-    if (end_key)
-    {
-        has_end_key_ = true;
-        end_key_buffer_ = std::string(*end_key);
-        end_key_view_ = end_key_buffer_;
-    }
-    tree_->seek("", path_stack_);
-    validate_current_leaf();
-    if (is_valid_ && has_end_key_ && key() >= end_key_view_)
-    {
-        is_valid_ = false;
-    }
-}
-
-DBCursor::DBCursor(Database *db, const TxnContext &ctx, StaxTree *tree, std::string_view start_key, std::optional<std::string_view> end_key, bool raw_mode)
-    : db_(db), ctx_(ctx), tree_(tree), is_valid_(false), raw_mode_(raw_mode)
-{
-    if (end_key)
-    {
-        has_end_key_ = true;
-        end_key_buffer_ = std::string(*end_key);
-        end_key_view_ = end_key_buffer_;
-    }
-    tree_->seek(start_key, path_stack_);
-
-    validate_current_leaf();
-
-    while (!is_valid_ && !path_stack_.empty())
-    {
-        next();
-    }
-
-    if (is_valid_)
-    {
-        if (has_end_key_ && key() >= end_key_view_)
-        {
-            is_valid_ = false;
-            return;
-        }
-    }
-}
-
-DBCursor::~DBCursor() = default;
-
-bool DBCursor::is_valid() const
-{
-    if (impl_)
-        return impl_->is_valid_;
-    return is_valid_;
-}
-
-std::string_view DBCursor::key() const
-{
-    if (impl_)
-        return impl_->last_key_view_;
-    return std::string_view(current_key_ptr_, current_key_len_);
-}
-
-DataView DBCursor::value() const
-{
-    if (impl_)
-        return impl_->is_valid_ ? DataView(impl_->current_record_data_.value_ptr, impl_->current_record_data_.value_len) : DataView{};
-    if (!is_valid_)
-        return {};
-    return DataView(current_record_data_.value_ptr, current_record_data_.value_len);
-}
-
-void DBCursor::advance_to_next_physical_leaf()
-{
-    if (path_stack_.empty())
-    {
-        is_valid_ = false;
-        return;
-    }
-    uint64_t current_leaf_pointer = path_stack_.top();
-    path_stack_.pop();
-
-    uint64_t next_subtree_root = NIL_POINTER;
-    while (!path_stack_.empty())
-    {
-        uint64_t parent_pointer = path_stack_.top();
-
-        uint64_t left_child_val = tree_->internal_node_allocator_.get_left_child_ptr(parent_pointer).load(std::memory_order_acquire);
-
-        if (left_child_val == current_leaf_pointer)
-        {
-            next_subtree_root = tree_->internal_node_allocator_.get_right_child_ptr(parent_pointer).load(std::memory_order_acquire);
-            break;
-        }
-        current_leaf_pointer = parent_pointer;
-        path_stack_.pop();
-    }
-
-    if (next_subtree_root != NIL_POINTER)
-    {
-        uint64_t pointer_to_push = next_subtree_root;
-        while (pointer_to_push != NIL_POINTER)
-        {
-            path_stack_.push(pointer_to_push);
-            if (pointer_to_push & POINTER_TAG_BIT)
-                break;
-            pointer_to_push = tree_->internal_node_allocator_.get_left_child_ptr(pointer_to_push).load(std::memory_order_acquire);
-        }
-    }
-}
-
-void DBCursor::next()
-{
-    if (impl_)
-    {
-        impl_->advance();
-        return;
-    }
-
-    while (true)
-    {
-        advance_to_next_physical_leaf();
-
-        if (path_stack_.empty())
-        {
-            is_valid_ = false;
-            return;
-        }
-
-        validate_current_leaf();
-
-        if (is_valid_)
-        {
-            if (has_end_key_ && key() >= end_key_view_)
-            {
-                is_valid_ = false;
-                return;
-            }
-            return;
-        }
-    }
-}
-
-void DBCursor::validate_current_leaf()
-{
-    if (path_stack_.empty())
-    {
-        is_valid_ = false;
-        return;
-    }
-    uint64_t current_pointer = path_stack_.top();
-
-    if (!(current_pointer & POINTER_TAG_BIT))
-    {
-        is_valid_ = false;
-        return;
-    }
-
-    uint32_t record_relative_offset = current_pointer & POINTER_INDEX_MASK;
-
-    if (raw_mode_)
-    {
-
-        current_record_data_ = tree_->record_allocator_.get_record_data(record_relative_offset);
-        current_key_ptr_ = current_record_data_.key_ptr;
-        current_key_len_ = current_record_data_.key_len;
-        is_valid_ = !current_record_data_.is_deleted;
-        return;
-    }
-
-    uint32_t version_relative_offset_for_mvcc = record_relative_offset;
-    while (version_relative_offset_for_mvcc != CollectionRecordAllocator::NIL_RECORD_OFFSET)
-    {
-        RecordData record = tree_->record_allocator_.get_record_data(version_relative_offset_for_mvcc);
-        if (record.txn_id <= ctx_.read_snapshot_id)
-        {
-            current_record_data_ = record;
-            current_key_ptr_ = record.key_ptr;
-            current_key_len_ = record.key_len;
-            is_valid_ = !current_record_data_.is_deleted;
-            return;
-        }
-        version_relative_offset_for_mvcc = record.prev_version_rel_offset;
-    }
-
-    is_valid_ = false;
 }
 
 thread_local HybridTimestampGenerator::ThreadTxnIDGenerator HybridTimestampGenerator::tls_generator_;
@@ -595,6 +303,7 @@ void Database::open_generation(const std::filesystem::path &db_directory, const 
 
     if (is_new)
     {
+        new (gen->file_header) FileHeader();
         gen->file_header->magic = 0xDEADBEEFCAFEBABE;
         gen->file_header->version = 12;
         gen->file_header->file_size = sizeof(FileHeader);
@@ -620,20 +329,17 @@ void Database::open_generation(const std::filesystem::path &db_directory, const 
         }
     }
 
-    gen->internal_node_allocator = std::make_unique<NodeAllocator>(gen->file_header, gen->mmap_base);
+    gen->internal_node_allocator = std::make_unique<StaxAllocator>(gen->file_header, gen->mmap_base);
 
     uint32_t active_collection_count = gen->file_header->collection_array_count.load(std::memory_order_acquire);
     uint32_t array_capacity = gen->file_header->collection_array_capacity;
 
     gen->owned_collections.reserve(array_capacity);
-    gen->owned_record_allocators.reserve(array_capacity);
 
     for (uint32_t i = 0; i < active_collection_count; ++i)
     {
-        gen->owned_record_allocators.emplace_back(
-            std::make_unique<CollectionRecordAllocator>(gen->file_header, gen->mmap_base, num_threads_));
         gen->owned_collections.emplace_back(
-            std::make_unique<Collection>(this, gen.get(), i, *gen->owned_record_allocators[i]));
+            std::make_unique<Collection>(this, gen.get(), i));
     }
 
     UniqueSpinLockGuard lock(generations_lock_);
@@ -674,7 +380,6 @@ uint32_t Database::get_collection(std::string_view name)
         if (observed_count >= active_gen.owned_collections.size())
         {
             active_gen.owned_collections.resize(observed_count + 1);
-            active_gen.owned_record_allocators.resize(observed_count + 1);
         }
 
         uint32_t expected_count_for_cas = observed_count;
@@ -689,8 +394,7 @@ uint32_t Database::get_collection(std::string_view name)
             new_entry.live_record_bytes.store(0, std::memory_order_relaxed);
             new_entry.object_id_counter.store(1, std::memory_order_relaxed);
 
-            active_gen.owned_record_allocators[new_index] = std::make_unique<CollectionRecordAllocator>(active_gen.file_header, active_gen.mmap_base, num_threads_);
-            active_gen.owned_collections[new_index] = std::make_unique<Collection>(this, &active_gen, new_index, *active_gen.owned_record_allocators[new_index]);
+            active_gen.owned_collections[new_index] = std::make_unique<Collection>(this, &active_gen, new_index);
 
             return new_index;
         }
@@ -758,7 +462,6 @@ void Database::compact(const std::filesystem::path &db_directory, size_t num_thr
 
     uint32_t source_collection_count = source_db->generations_.front()->file_header->collection_array_count.load(std::memory_order_acquire);
 
-
     for (uint32_t i = 0; i < source_collection_count; ++i)
     {
         uint32_t collection_name_hash_from_source = source_db->generations_.front()->get_collection_entry_ref(i).name_hash;
@@ -770,31 +473,15 @@ void Database::compact(const std::filesystem::path &db_directory, size_t num_thr
 
         TxnContext compaction_read_ctx = source_db->begin_transaction_context(0, true);
         TxnContext compaction_write_ctx = compacted_db->begin_transaction_context(0, false);
-        TransactionBatch write_batch;
 
-        if (flatten)
-        {
-            std::unordered_map<std::string, RecordData> latest_versions;
-            for (auto cursor = source_collection.seek_first(compaction_read_ctx); cursor->is_valid(); cursor->next())
-            {
-                latest_versions[std::string(cursor->key())] = cursor->current_record_data_;
-            }
-            for (const auto &pair : latest_versions)
-            {
-                if (!pair.second.is_deleted)
-                {
-                    dest_collection.insert(compaction_write_ctx, write_batch, pair.first, pair.second.value_view());
-                }
-            }
+        // This part needs to be re-thought with the new API.
+        // For now, let's just copy everything.
+        auto records = source_collection.range(compaction_read_ctx, "");
+        for (auto record : records) {
+            dest_collection.insert(compaction_write_ctx, record->get_key(), std::string_view(record->get_value_data(), record->value_len));
         }
-        else
-        {
-            for (auto cursor = source_collection.seek_first(compaction_read_ctx); cursor->is_valid(); cursor->next())
-            {
-                dest_collection.insert(compaction_write_ctx, write_batch, cursor->key(), static_cast<std::string_view>(cursor->value()));
-            }
-        }
-        compacted_db->commit(compaction_write_ctx, dest_collection_idx, write_batch);
+
+        compacted_db->commit(compaction_write_ctx, dest_collection_idx);
     }
 
     TxnID final_compacted_db_txn_id = compacted_db->get_last_committed_txn_id();
@@ -845,7 +532,7 @@ TxnContext Database::begin_transaction_context(size_t thread_id, bool is_read_on
     }
 }
 
-void Database::commit(const TxnContext &ctx, uint32_t collection_idx, const TransactionBatch &batch)
+void Database::commit(const TxnContext &ctx, uint32_t collection_idx)
 {
     if (ctx.txn_id == 0)
         return;
@@ -853,16 +540,6 @@ void Database::commit(const TxnContext &ctx, uint32_t collection_idx, const Tran
     DbGeneration *active_gen = get_active_generation();
     if (!active_gen)
         return;
-
-    CollectionEntry &entry = active_gen->get_collection_entry_ref(collection_idx);
-    if (batch.logical_item_count_delta != 0)
-    {
-        entry.logical_item_count.fetch_add(batch.logical_item_count_delta, std::memory_order_relaxed);
-    }
-    if (batch.live_record_bytes_delta != 0)
-    {
-        entry.live_record_bytes.fetch_add(batch.live_record_bytes_delta, std::memory_order_relaxed);
-    }
 
     update_last_committed_txn_id(ctx.txn_id);
 
@@ -883,14 +560,20 @@ void Database::abort(const TxnContext &ctx)
 {
 }
 
-Collection::Collection(Database *parent_db, DbGeneration *owning_generation, uint32_t collection_idx, CollectionRecordAllocator &record_allocator)
-    : parent_db_(parent_db), owning_generation_(owning_generation), collection_idx_(collection_idx), record_allocator_(&record_allocator)
+StaxAllocator* Database::get_global_allocator() {
+    if (generations_.empty()) {
+        return nullptr;
+    }
+    return generations_.front()->internal_node_allocator.get();
+}
+
+Collection::Collection(Database *parent_db, DbGeneration *owning_generation, uint32_t collection_idx)
+    : parent_db_(parent_db), owning_generation_(owning_generation), collection_idx_(collection_idx)
 {
     CollectionEntry &entry = owning_generation_->get_collection_entry_ref(collection_idx);
 
-    critbit_tree_ = std::make_unique<StaxTree>(
+    critbit_tree_ = std::make_unique<StaxTree16>(
         *owning_generation_->internal_node_allocator,
-        *record_allocator_,
         entry.root_node_ptr);
 }
 
@@ -899,9 +582,9 @@ TxnContext Collection::begin_transaction_context(size_t thread_id, bool is_read_
     return parent_db_->begin_transaction_context(thread_id, is_read_only);
 }
 
-void Collection::commit(const TxnContext &ctx, TransactionBatch &batch)
+void Collection::commit(const TxnContext &ctx)
 {
-    parent_db_->commit(ctx, collection_idx_, batch);
+    parent_db_->commit(ctx, collection_idx_);
 }
 
 void Collection::abort(const TxnContext &ctx)
@@ -909,162 +592,53 @@ void Collection::abort(const TxnContext &ctx)
     parent_db_->abort(ctx);
 }
 
-void Collection::insert(const TxnContext &ctx, TransactionBatch &batch, std::string_view key, std::string_view value)
+void Collection::insert(const TxnContext &ctx, std::string_view key, std::string_view value)
 {
     if (ctx.txn_id == 0)
         throw std::runtime_error("Cannot perform writes in a read-only transaction context.");
-    critbit_tree_->insert(ctx, key, value);
-    batch.logical_item_count_delta++;
-    batch.live_record_bytes_delta += (key.length() + value.length() + CollectionRecordAllocator::HEADER_SIZE);
+
+    ThreadLocalAllocator local_alloc(*parent_db_->get_global_allocator());
+    critbit_tree_->insert(local_alloc, ctx, key, value, false);
 }
 
-void Collection::remove(const TxnContext &ctx, TransactionBatch &batch, std::string_view key)
+void Collection::remove(const TxnContext &ctx, std::string_view key)
 {
     if (ctx.txn_id == 0)
         throw std::runtime_error("Cannot perform writes in a read-only transaction context.");
-    critbit_tree_->remove(ctx, key);
-    batch.logical_item_count_delta--;
+
+    ThreadLocalAllocator local_alloc(*parent_db_->get_global_allocator());
+    critbit_tree_->remove(local_alloc, ctx, key);
 }
 
-std::optional<RecordData> Collection::get(const TxnContext &ctx, std::string_view key)
+StaxRecord* Collection::get(const TxnContext &ctx, std::string_view key)
 {
-    for (const auto &gen_ptr : parent_db_->get_generations())
-    {
-        if (collection_idx_ < gen_ptr->owned_collections.size() && gen_ptr->owned_collections[collection_idx_])
-        {
-            auto result = gen_ptr->owned_collections[collection_idx_]->get_critbit_tree().get(ctx, key);
-            if (result.has_value())
-            {
-                return result;
-            }
-        }
-    }
-    return std::nullopt;
+    // The new MVCC model means we only need to check the active generation's tree.
+    // The tree itself handles visibility of versions.
+    return critbit_tree_->get(ctx, key);
 }
 
 void Collection::insert_sync_direct(std::string_view key, std::string_view value, size_t thread_id)
 {
     TxnContext ctx = parent_db_->begin_transaction_context(thread_id, false);
-    TransactionBatch batch;
-    critbit_tree_->insert(ctx, key, value);
-    batch.logical_item_count_delta++;
-    batch.live_record_bytes_delta += (key.length() + value.length() + CollectionRecordAllocator::HEADER_SIZE);
-    parent_db_->commit(ctx, collection_idx_, batch);
+    ThreadLocalAllocator local_alloc(*parent_db_->get_global_allocator());
+    critbit_tree_->insert(local_alloc, ctx, key, value, false);
+    parent_db_->commit(ctx, collection_idx_);
 }
 
 void Collection::remove_sync_direct(std::string_view key, size_t thread_id)
 {
     TxnContext ctx = parent_db_->begin_transaction_context(thread_id, false);
-    TransactionBatch batch;
-    critbit_tree_->remove(ctx, key);
-    batch.logical_item_count_delta--;
-    parent_db_->commit(ctx, collection_idx_, batch);
+    ThreadLocalAllocator local_alloc(*parent_db_->get_global_allocator());
+    critbit_tree_->remove(local_alloc, ctx, key);
+    parent_db_->commit(ctx, collection_idx_);
 }
 
-std::unique_ptr<DBCursor> Collection::seek(const TxnContext &ctx, std::string_view start_key, std::optional<std::string_view> end_key)
+std::vector<StaxRecord*> Collection::range(const TxnContext &ctx, std::string_view prefix)
 {
-    return std::make_unique<DBCursor>(parent_db_, ctx, collection_idx_, start_key, end_key);
+    return critbit_tree_->range(ctx, prefix);
 }
 
-std::unique_ptr<DBCursor> Collection::seek_first(const TxnContext &ctx, std::optional<std::string_view> end_key)
+std::vector<StaxRecord*> Collection::range(const TxnContext &ctx, std::string_view prefix, uint64_t start_ts, uint64_t end_ts)
 {
-    return std::make_unique<DBCursor>(parent_db_, ctx, collection_idx_, "", end_key);
-}
-
-std::unique_ptr<DBCursor> Collection::seek_raw(const TxnContext &ctx, std::string_view start_key, std::optional<std::string_view> end_key)
-{
-    return std::make_unique<DBCursor>(parent_db_, ctx, &this->get_critbit_tree(), start_key, end_key, true);
-}
-
-uint64_t CollectionRecordAllocator::allocate_data_chunk(size_t size_bytes, size_t alignment) {
-    if (!file_header_) {
-        throw std::runtime_error("Cannot allocate chunk: file header is null.");
-    }
-
-    if ((alignment & (alignment - 1)) != 0)
-    {
-        throw std::invalid_argument("Alignment must be a power of two.");
-    }
-
-    const uint64_t alignment_mask = alignment - 1;
-    uint64_t current_offset = file_header_->global_alloc_offset.load(std::memory_order_acquire);
-
-    while (true)
-    {
-        uint64_t aligned_offset = (current_offset + alignment_mask) & ~alignment_mask;
-        uint64_t next_offset = aligned_offset + size_bytes;
-
-        if (next_offset > DB_MAX_VIRTUAL_SIZE)
-        {
-            throw std::runtime_error("Database out of space during aligned chunk allocation.");
-        }
-
-        if (file_header_->global_alloc_offset.compare_exchange_weak(current_offset, next_offset, std::memory_order_release, std::memory_order_acquire))
-        {
-            return aligned_offset;
-        }
-    }
-}
-
-
-CollectionRecordAllocator::CollectionRecordAllocator(FileHeader* file_header, uint8_t* mmap_base_addr, size_t num_threads_configured_for_db) noexcept
-    : file_header_(file_header), mmap_base_addr_(mmap_base_addr), num_threads_configured_for_db_(num_threads_configured_for_db)
-{
-    for (size_t i = 0; i < MAX_CONCURRENT_THREADS; ++i)
-    {
-        thread_tlabs_[i].start_ptr = nullptr;
-        thread_tlabs_[i].end_ptr = nullptr;
-        thread_tlabs_[i].current_offset_in_tlab.store(0, std::memory_order_relaxed);
-    }
-}
-
-void CollectionRecordAllocator::allocate_new_tlab(size_t thread_id, size_t requested_record_size)
-{
-    if (thread_id >= num_threads_configured_for_db_)
-    {
-        throw std::out_of_range("Thread ID exceeds configured number of threads for CollectionRecordAllocator.");
-    }
-
-    size_t chunk_size = std::max(static_cast<size_t>(RECORD_ALLOCATOR_CHUNK_SIZE), requested_record_size);
-    chunk_size = (chunk_size + OFFSET_GRANULARITY - 1) & ~(static_cast<size_t>(OFFSET_GRANULARITY - 1));
-
-    uint64_t chunk_start_offset = allocate_data_chunk(chunk_size);
-
-    ThreadLocalBuffer &tlab = thread_tlabs_[thread_id];
-    tlab.start_ptr = mmap_base_addr_ + chunk_start_offset;
-    tlab.end_ptr = tlab.start_ptr + chunk_size;
-    tlab.current_offset_in_tlab.store(0, std::memory_order_relaxed);
-}
-
-void *CollectionRecordAllocator::reserve_record_space(size_t thread_id, size_t key_len, size_t value_len, uint32_t &out_record_rel_offset)
-{
-    if (key_len > MAX_KEY_VALUE_LENGTH || value_len > MAX_KEY_VALUE_LENGTH)
-    {
-        throw std::overflow_error("Key or value length exceeds maximum allowed (65535 bytes).");
-    }
-
-    if (thread_id >= num_threads_configured_for_db_)
-    {
-        throw std::out_of_range("Thread ID exceeds configured number of threads in CollectionRecordAllocator::reserve_record_space.");
-    }
-
-    const size_t total_record_size = get_allocated_record_size(key_len, value_len);
-
-    for (int i = 0; i < 2; ++i)
-    {
-        ThreadLocalBuffer &tlab = thread_tlabs_[thread_id];
-
-        if (tlab.start_ptr && (tlab.start_ptr + tlab.current_offset_in_tlab.load(std::memory_order_relaxed) + total_record_size <= tlab.end_ptr))
-        {
-            uint64_t allocated_offset_in_tlab = tlab.current_offset_in_tlab.fetch_add(total_record_size, std::memory_order_relaxed);
-            uint64_t absolute_record_addr = reinterpret_cast<uint64_t>(tlab.start_ptr + allocated_offset_in_tlab);
-            uint64_t byte_offset_from_base = absolute_record_addr - reinterpret_cast<uint64_t>(mmap_base_addr_);
-
-            out_record_rel_offset = static_cast<uint32_t>(byte_offset_from_base / OFFSET_GRANULARITY);
-            return reinterpret_cast<void *>(absolute_record_addr);
-        }
-        allocate_new_tlab(thread_id, total_record_size);
-    }
-
-    throw std::runtime_error("CollectionRecordAllocator: Persistent out of space after attempting to get a new chunk.");
+    return critbit_tree_->range(ctx, prefix, start_ts, end_ts);
 }
