@@ -1,4 +1,3 @@
-
 #pragma once
 
 #include <string>
@@ -10,7 +9,6 @@
 
 #include "stax_db/db.h"          
 #include "stax_common/constants.h"   
-#include "stax_core/value_store.hpp" 
 #include "stax_tx/transaction.h" 
 
 namespace FFIBench {
@@ -99,4 +97,4 @@ inline void run_ffi_style_benchmark(::Database* db) {
     std::cout << "==========================================================================================\n" << std::endl;
 }
 
-} 
+}

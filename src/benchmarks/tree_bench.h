@@ -1,4 +1,3 @@
-
 #pragma once
 
 #include <string>
@@ -17,8 +16,6 @@
 
 #include "stax_db/db.h"
 #include "stax_core/stax_tree.hpp" 
-#include "stax_core/node_allocator.hpp"
-#include "stax_core/value_store.hpp"
 #include "stax_db/path_engine.h"
 #include "stax_common/constants.h" 
 #include "benchmarks/throughput_bench.h" 
@@ -77,11 +74,11 @@ inline void run_tree_stress_test() {
     auto start_insert = std::chrono::high_resolution_clock::now();
     std::vector<std::thread> insert_threads;
     for (size_t i = 0; i < num_threads; ++i) {
-        insert_threads.emplace_back([&tree, &thread_data, thread_idx = i]() {
+        insert_threads.emplace_back([&tree, &thread_data, &db, thread_idx = i]() {
             
             TxnContext ctx = {1, 1, thread_idx}; 
             for (const auto& item : thread_data[thread_idx]) {
-                tree.insert(ctx, item.key, item.value); 
+                tree.insert(db->get_thread_local_allocator(thread_idx), ctx, item.key, item.value);
             }
         });
     }
@@ -166,4 +163,4 @@ inline void run_tree_stress_test() {
     }
 }
 
-} 
+}

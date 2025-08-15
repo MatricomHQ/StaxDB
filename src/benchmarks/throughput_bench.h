@@ -1,4 +1,3 @@
-
 #pragma once
 
 #include <string>
@@ -24,7 +23,6 @@
 #include "stax_db/db.h"          
 #include "stax_db/path_engine.h" 
 #include "stax_common/constants.h"   
-#include "stax_core/value_store.hpp" 
 #include "stax_tx/transaction.h" 
 #include "tests/common_test_utils.h" 
 
@@ -120,7 +118,7 @@ inline std::vector<TestData> generate_throughput_test_data(size_t num_items, siz
         
         
         const size_t total_record_size_allocated = 
-            CollectionRecordAllocator::get_allocated_record_size(key_str.length(), value_str.length());
+            sizeof(StaxRecord) + key_str.length() + value_str.length();
 
         data.push_back({
             key_str,
@@ -349,4 +347,4 @@ inline void run_throughput_suite(const std::string& suite_name, size_t num_items
 }
 
 
-} 
+}

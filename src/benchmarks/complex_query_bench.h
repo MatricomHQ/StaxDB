@@ -28,7 +28,6 @@
 #include "stax_common/constants.h"   
 #include "stax_db/query.h"       
 #include "stax_common/roaring.h"     
-#include "stax_core/value_store.hpp" 
 #include "stax_tx/transaction.h" 
 #include "tests/common_test_utils.h" 
 
@@ -406,4 +405,4 @@ inline void run_complex_query_suite() {
         }
     }
 }
-} 
+}

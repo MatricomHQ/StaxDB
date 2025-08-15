@@ -124,7 +124,6 @@ target_link_libraries(stax_node_api INTERFACE stax_graph stax_db stax_tx stax_co
 add_executable(stax_benchmark
     src/main.cpp
     src/benchmarks/tpcc.cpp
-    src/stax_api/tcp_server.cpp # Added to stax_benchmark sources
 
 )
 target_link_libraries(stax_benchmark PRIVATE stax_graph stax_common)
@@ -132,7 +131,6 @@ target_link_libraries(stax_benchmark PRIVATE stax_graph stax_common)
 # --- Boost.Asio Integration ---
 find_package(Boost REQUIRED COMPONENTS system)
 # Corrected include directory for Asio
-include_directories(third_party/asio/include/boost/)
 
 # Link benchmark runner to Boost
 target_link_libraries(stax_benchmark PRIVATE Boost::system)
