@@ -38,5 +38,7 @@
   "dependencies": {
     "node-addon-api": "^7.1.0"
   },
-  "devDependencies": {}
+  "devDependencies": {
+    "lmdb": "^3.0.0"
+  }
 }
