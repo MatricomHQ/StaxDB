@@ -1,7 +1,6 @@
 #include "stax_api/staxdb_api.h"
 #include "stax_db/db.h"
 #include "stax_tx/transaction.h"
-#include "stax_tx/db_cursor.hpp"
 #include "stax_graph/graph_engine.h"
 #include "stax_common/roaring.h"
 #include "stax_common/binary_utils.h" 
@@ -269,20 +268,23 @@ StaxResultSet staxdb_execute_range_query(Database* db_instance, StaxCollection c
         }
 
         
-        for (auto cursor = col.seek(ctx, start_key, end_key); cursor->is_valid(); cursor->next()) {
-            std::string_view key_sv = cursor->key();
-            DataView value_dv = cursor->value();
+        for (const auto& record : col.get_critbit_tree().range(ctx, start_key)) {
+            std::string_view key_sv = record.key_view();
+            if (end_key.has_value() && key_sv >= end_key.value()) {
+                break;
+            }
+            std::string_view value_dv = record.value_view();
             
             size_t key_offset = kv_data->data_buffer.size();
             kv_data->data_buffer.insert(kv_data->data_buffer.end(), key_sv.begin(), key_sv.end());
             
             size_t value_offset = kv_data->data_buffer.size();
-            kv_data->data_buffer.insert(kv_data->data_buffer.end(), value_dv.data, value_dv.data + value_dv.len);
+            kv_data->data_buffer.insert(kv_data->data_buffer.end(), value_dv.data(), value_dv.data() + value_dv.length());
 
             
             kv_data->kv_pairs.push_back({
                 {reinterpret_cast<const char*>(key_offset), key_sv.length()},
-                {reinterpret_cast<const char*>(value_offset), value_dv.len}
+                {reinterpret_cast<const char*>(value_offset), value_dv.length()}
             });
         }
 

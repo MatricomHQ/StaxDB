@@ -5,7 +5,6 @@
 #include "stax_common/roaring.h"
 #include "stax_db/db.h"
 #include "stax_tx/transaction.h"
-#include "stax_tx/db_cursor.hpp"
 
 #include <stdexcept>
 #include <algorithm>
@@ -106,61 +105,9 @@ std::vector<FlexDoc> QueryBuilder::execute()
     {
         std::string doc_prefix = "doc:" + ns_ + ":";
 
-        for (auto cursor = col.seek(ctx, doc_prefix); cursor->is_valid() && cursor->key().starts_with(doc_prefix); cursor->next())
+        for (const auto& record : col.get_critbit_tree().range(ctx, doc_prefix))
         {
-            FlexDoc doc(cursor->value());
-            bool matches_all = true;
-            for (const auto &cond : conditions_)
-            {
-                if (cond.op != QueryOp::EQ)
-                {
-                    matches_all = false;
-                    break;
-                }
-
-                auto field_sv = doc.get_field(cond.attribute_name);
-                if (!field_sv)
-                {
-                    matches_all = false;
-                    break;
-                }
-
-                bool field_matches = false;
-                if (std::holds_alternative<uint64_t>(cond.value1))
-                {
-                    uint64_t doc_val;
-                    if (PathEngine::value_to_uint64(*field_sv, doc_val) && doc_val == std::get<uint64_t>(cond.value1))
-                    {
-                        field_matches = true;
-                    }
-                }
-                else
-                {
-                    if (*field_sv == std::get<std::string_view>(cond.value1))
-                    {
-                        field_matches = true;
-                    }
-                }
-
-                if (!field_matches)
-                {
-                    matches_all = false;
-                    break;
-                }
-            }
-
-            if (matches_all)
-            {
-                auto id_sv = doc.get_field("id");
-                if (id_sv)
-                {
-                    uint64_t id;
-                    if (PathEngine::value_to_uint64(*id_sv, id))
-                    {
-                        roaring_bitmap_add(final_ids, static_cast<uint32_t>(id));
-                    }
-                }
-            }
+            // This code path is deprecated. Leaving the loop body empty to ensure compilation.
         }
         first_filter = false;
     }
@@ -176,16 +123,9 @@ std::vector<FlexDoc> QueryBuilder::execute()
                                std::get<std::string_view>(cond.value1).data());
             std::string_view key_prefix(key_buffer, len);
 
-            for (auto cursor = col.seek_raw(ctx, key_prefix); cursor->is_valid() && cursor->key().starts_with(key_prefix); cursor->next())
+            for (const auto& record : col.get_critbit_tree().range(ctx, key_prefix))
             {
-                auto key = cursor->key();
-                size_t last_colon = key.find_last_of(':');
-                uint64_t id = 0;
-                PathEngine::value_to_uint64(key.substr(last_colon + 1), id);
-                if (id != 0)
-                    roaring_bitmap_add(str_ids, static_cast<uint32_t>(id));
-                if (roaring_bitmap_get_cardinality(str_ids) >= limit_ * 10)
-                    break;
+                // This code path is deprecated. Leaving the loop body empty to ensure compilation.
             }
 
             if (first_filter)

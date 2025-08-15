@@ -1,7 +1,6 @@
 #include "stax_db/db.h"
 #include "stax_common/os_file_extensions.h"
 #include "stax_tx/transaction.h"
-#include "stax_tx/db_cursor.hpp"
 #include "stax_graph/graph_engine.h"
 #include "stax_db/statistics.h"
 #include <stdexcept>
@@ -57,90 +56,6 @@ CollectionEntry &DbGeneration::get_collection_entry_ref(uint32_t idx) const
     }
     return *reinterpret_cast<CollectionEntry *>(mmap_base + file_header->collection_array_offset + (idx * sizeof(CollectionEntry)));
 }
-
-// =================================================================================================
-// --- CURSOR IMPLEMENTATION (Temporarily Disabled) ---
-// The cursor implementation was tightly coupled to the old crit-bit tree structure.
-// It needs to be re-written to support the new nibble-based tree.
-// For now, all cursor functions will throw a runtime_error.
-// =================================================================================================
-
-MergedCursorImpl::MergedCursorImpl(Database *db, const TxnContext &ctx, uint32_t collection_idx, std::string_view start_key_view, std::optional<std::string_view> end_key)
-    : db_(db), ctx_(ctx)
-{
-    throw std::runtime_error("Cursor functionality is temporarily disabled pending rewrite for new tree structure.");
-}
-
-void MergedCursorImpl::advance()
-{
-    throw std::runtime_error("Cursor functionality is temporarily disabled.");
-}
-
-DBCursor::DBCursor() : impl_(nullptr), ctx_(inert_context) {
-    // throw std::runtime_error("Cursor functionality is temporarily disabled.");
-}
-
-DBCursor::DBCursor(Database *db, const TxnContext &ctx, uint32_t collection_idx, std::string_view start_key, std::optional<std::string_view> end_key)
-    : impl_(std::make_unique<MergedCursorImpl>(db, ctx, collection_idx, start_key, end_key)), ctx_(ctx) {
-    throw std::runtime_error("Cursor functionality is temporarily disabled.");
-}
-
-DBCursor::DBCursor(Database *db, const TxnContext &ctx, StaxTree *tree, std::optional<std::string_view> end_key, bool raw_mode)
-    : db_(db), ctx_(ctx), tree_(tree), is_valid_(false), raw_mode_(raw_mode)
-{
-    throw std::runtime_error("Cursor functionality is temporarily disabled.");
-}
-
-DBCursor::DBCursor(Database *db, const TxnContext &ctx, StaxTree *tree, std::string_view start_key, std::optional<std::string_view> end_key, bool raw_mode)
-    : db_(db), ctx_(ctx), tree_(tree), is_valid_(false), raw_mode_(raw_mode)
-{
-    throw std::runtime_error("Cursor functionality is temporarily disabled.");
-}
-
-DBCursor::~DBCursor() = default;
-
-bool DBCursor::is_valid() const
-{
-    if (impl_) return impl_->is_valid_;
-    return is_valid_;
-}
-
-std::string_view DBCursor::key() const
-{
-    if (impl_) return impl_->last_key_view_;
-    return std::string_view(current_key_ptr_, current_key_len_);
-}
-
-DataView DBCursor::value() const
-{
-    if (impl_) return impl_->is_valid_ ? DataView(impl_->current_record_data_.value_ptr, impl_->current_record_data_.value_len) : DataView{};
-    if (!is_valid_) return {};
-    return DataView(current_record_data_.value_ptr, current_record_data_.value_len);
-}
-
-void DBCursor::advance_to_next_physical_leaf()
-{
-    throw std::runtime_error("Cursor functionality is temporarily disabled.");
-}
-
-void DBCursor::next()
-{
-    if (impl_) {
-        impl_->advance();
-        return;
-    }
-    throw std::runtime_error("Cursor functionality is temporarily disabled.");
-}
-
-void DBCursor::validate_current_leaf()
-{
-    throw std::runtime_error("Cursor functionality is temporarily disabled.");
-}
-
-
-// =================================================================================================
-// --- End of Disabled Cursor Code ---
-// =================================================================================================
 
 thread_local HybridTimestampGenerator::ThreadTxnIDGenerator HybridTimestampGenerator::tls_generator_;
 
@@ -577,9 +492,9 @@ void Database::compact(const std::filesystem::path &db_directory, size_t num_thr
         if (flatten)
         {
             std::unordered_map<std::string, RecordData> latest_versions;
-            for (auto cursor = source_collection.seek_first(compaction_read_ctx); cursor->is_valid(); cursor->next())
+            for (const auto& record : source_collection.get_critbit_tree().range(compaction_read_ctx, ""))
             {
-                latest_versions[std::string(cursor->key())] = cursor->current_record_data_;
+                latest_versions[std::string(record.key_view())] = record;
             }
             for (const auto &pair : latest_versions)
             {
@@ -591,9 +506,9 @@ void Database::compact(const std::filesystem::path &db_directory, size_t num_thr
         }
         else
         {
-            for (auto cursor = source_collection.seek_first(compaction_read_ctx); cursor->is_valid(); cursor->next())
+            for (const auto& record : source_collection.get_critbit_tree().range(compaction_read_ctx, ""))
             {
-                dest_collection.insert(compaction_write_ctx, write_batch, cursor->key(), static_cast<std::string_view>(cursor->value()));
+                dest_collection.insert(compaction_write_ctx, write_batch, record.key_view(), record.value_view());
             }
         }
         compacted_db->commit(compaction_write_ctx, dest_collection_idx, write_batch);
@@ -767,19 +682,4 @@ void Collection::remove_sync_direct(std::string_view key, size_t thread_id)
     critbit_tree_->remove(local_alloc, ctx, key);
     batch.logical_item_count_delta--;
     parent_db_->commit(ctx, collection_idx_, batch);
-}
-
-std::unique_ptr<DBCursor> Collection::seek(const TxnContext &ctx, std::string_view start_key, std::optional<std::string_view> end_key)
-{
-    return std::make_unique<DBCursor>(parent_db_, ctx, collection_idx_, start_key, end_key);
-}
-
-std::unique_ptr<DBCursor> Collection::seek_first(const TxnContext &ctx, std::optional<std::string_view> end_key)
-{
-    return std::make_unique<DBCursor>(parent_db_, ctx, collection_idx_, "", end_key);
-}
-
-std::unique_ptr<DBCursor> Collection::seek_raw(const TxnContext &ctx, std::string_view start_key, std::optional<std::string_view> end_key)
-{
-    return std::make_unique<DBCursor>(parent_db_, ctx, &this->get_critbit_tree(), start_key, end_key, true);
 }

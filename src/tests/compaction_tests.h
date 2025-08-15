@@ -28,7 +28,6 @@
 
 #include "stax_db/db.h"
 #include "stax_tx/transaction.h"
-#include "stax_tx/db_cursor.hpp" 
 #include "stax_db/path_engine.h"
 #include "stax_common/constants.h"
 #include "stax_db/query.h"
@@ -171,15 +170,15 @@ void run_hot_compaction_stress_test() {
     {
         
         TxnContext ctx = compacted_col.begin_transaction_context(0, true);
-        for (auto cursor = compacted_col.seek_first(ctx); cursor->is_valid(); cursor->next()) {
-            final_db_state[std::string(cursor->key())] = std::string(cursor->value());
+        for (const auto& record : compacted_col.get_critbit_tree().range(ctx, "")) {
+            final_db_state[std::string(record.key_view())] = std::string(record.value_view());
         }
     }
     {
         
         TxnContext ctx = final_new_col.begin_transaction_context(0, true);
-        for (auto cursor = final_new_col.seek_first(ctx); cursor->is_valid(); cursor->next()) {
-             final_db_state[std::string(cursor->key())] = std::string(cursor->value());
+        for (const auto& record : final_new_col.get_critbit_tree().range(ctx, "")) {
+             final_db_state[std::string(record.key_view())] = std::string(record.value_view());
         }
     }
 

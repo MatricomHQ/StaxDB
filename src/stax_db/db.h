@@ -22,7 +22,6 @@
 #include "stax_common/constants.h"
 
 class Database;
-class DBCursor;
 class Collection;
 
 namespace StaxStats
@@ -86,14 +85,8 @@ public:
     void insert_sync_direct(std::string_view key, std::string_view value, size_t thread_id);
     void remove_sync_direct(std::string_view key, size_t thread_id);
 
-    std::unique_ptr<DBCursor> seek(const TxnContext &ctx, std::string_view start_key, std::optional<std::string_view> end_key = std::nullopt);
-    std::unique_ptr<DBCursor> seek_first(const TxnContext &ctx, std::optional<std::string_view> end_key = std::nullopt);
-    std::unique_ptr<DBCursor> seek_raw(const TxnContext &ctx, std::string_view start_key, std::optional<std::string_view> end_key = std::nullopt);
-
 private:
     friend class Database;
-    friend class DBCursor;
-    friend class MergedCursorImpl;
 
     Database *parent_db_;
     DbGeneration *owning_generation_;
@@ -152,8 +145,6 @@ public:
 private:
     friend class Collection;
     friend class StaxStats::DatabaseStatisticsCollector;
-    friend class MergedCursorImpl;
-    friend class DBCursor;
 
     static uint64_t hash_name(std::string_view name);
 

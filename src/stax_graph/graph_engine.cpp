@@ -1,5 +1,4 @@
 #include "stax_graph/graph_engine.h"
-#include "stax_tx/db_cursor.hpp"
 #include "stax_common/binary_utils.h"
 #include <cassert>
 #include <stdexcept>
@@ -41,15 +40,18 @@ IndexScanOperator::IndexScanOperator(Collection *col, const TxnContext &ctx, std
 
 bool IndexScanOperator::next(uint32_t &out_id)
 {
-    if (cursor_ && cursor_->is_valid())
+    while (iterator_ && *iterator_ != *end_iterator_)
     {
-        std::string_view key = cursor_->key();
+        const RecordData& record = **iterator_;
+        std::string_view key = record.key_view();
+
+        ++(*iterator_);
+
         if (key.starts_with(key_prefix_))
         {
             std::string_view id_part = key.substr(key_prefix_.length());
             if (id_part.length() == GraphTransaction::BINARY_U32_SIZE) {
                 out_id = from_binary_key_u32(id_part);
-                cursor_->next();
                 return true;
             }
         }
@@ -59,7 +61,9 @@ bool IndexScanOperator::next(uint32_t &out_id)
 
 void IndexScanOperator::reset()
 {
-    cursor_ = col_->seek(ctx_, key_prefix_);
+    auto range_cursor = col_->get_critbit_tree().range(ctx_, key_prefix_);
+    iterator_ = std::make_unique<StaxTree::Cursor>(std::move(range_cursor));
+    end_iterator_ = std::make_unique<StaxTree::Cursor>(iterator_->end());
 }
 
 ForwardScanOperator::ForwardScanOperator(Collection *col, const TxnContext &ctx, uint32_t source_id, std::string_view field_name)
@@ -77,16 +81,18 @@ ForwardScanOperator::ForwardScanOperator(Collection *col, const TxnContext &ctx,
 
 bool ForwardScanOperator::next(uint32_t &out_id)
 {
-    if (cursor_ && cursor_->is_valid())
+    while (iterator_ && *iterator_ != *end_iterator_)
     {
-        std::string_view key = cursor_->key();
+        const RecordData& record = **iterator_;
+        std::string_view key = record.key_view();
+
+        ++(*iterator_);
 
         if (key.starts_with(key_prefix_))
         {
             std::string_view id_part = key.substr(key_prefix_.length());
              if (id_part.length() == GraphTransaction::BINARY_U32_SIZE) {
                 out_id = from_binary_key_u32(id_part);
-                cursor_->next();
                 return true;
             }
         }
@@ -96,7 +102,9 @@ bool ForwardScanOperator::next(uint32_t &out_id)
 
 void ForwardScanOperator::reset()
 {
-    cursor_ = col_->seek(ctx_, key_prefix_);
+    auto range_cursor = col_->get_critbit_tree().range(ctx_, key_prefix_);
+    iterator_ = std::make_unique<StaxTree::Cursor>(std::move(range_cursor));
+    end_iterator_ = std::make_unique<StaxTree::Cursor>(iterator_->end());
 }
 
 IntersectOperator::IntersectOperator(std::unique_ptr<QueryOperator> left, std::unique_ptr<QueryOperator> right)
@@ -152,10 +160,10 @@ std::vector<std::tuple<uint32_t, std::string, std::string>> GraphReader::get_pro
 
     std::vector<std::tuple<uint32_t, std::string, std::string>> results;
 
-    for (auto cursor = ofv_col_->seek(ctx_, prefix); cursor->is_valid() && cursor->key().starts_with(prefix); cursor->next())
+    for (const auto& record : ofv_col_->get_critbit_tree().range(ctx_, prefix))
     {
-        std::string_view key_view = cursor->key();
-        std::string_view value_view_sv(cursor->value());
+        std::string_view key_view = record.key_view();
+        std::string_view value_view_sv = record.value_view();
 
         std::string_view rest_of_key = key_view.substr(prefix.length());
         
@@ -186,10 +194,10 @@ std::vector<std::tuple<uint32_t, std::string, std::string, StaxValueType>> Graph
 
     std::vector<std::tuple<uint32_t, std::string, std::string, StaxValueType>> results;
 
-    for (auto cursor = ofv_col_->seek(ctx_, prefix); cursor->is_valid() && cursor->key().starts_with(prefix); cursor->next())
+    for (const auto& record : ofv_col_->get_critbit_tree().range(ctx_, prefix))
     {
-        std::string_view key_view = cursor->key();
-        std::string_view value_view_sv(cursor->value());
+        std::string_view key_view = record.key_view();
+        std::string_view value_view_sv = record.value_view();
 
         std::string_view rest_of_key = key_view.substr(prefix.length());
         
@@ -261,8 +269,8 @@ std::optional<uint64_t> GraphReader::get_property_for_object_numeric(uint32_t ob
 
 std::set<std::string> GraphReader::get_all_relationship_types() {
     std::set<std::string> rel_types;
-    for (auto cursor = fvo_col_->seek_first(ctx_); cursor->is_valid(); cursor->next()) {
-        std::string_view key = cursor->key();
+    for (const auto& record : fvo_col_->get_critbit_tree().range(ctx_, "")) {
+        std::string_view key = record.key_view();
         size_t first_sep = key.find(KEY_SEPARATOR);
         if (first_sep != std::string_view::npos) {
             rel_types.insert(std::string(key.substr(0, first_sep)));
@@ -293,8 +301,8 @@ void GraphReader::get_objects_by_property_into_roaring(std::string_view field_na
 
     std::string fvo_prefix = std::string(field_name) + KEY_SEPARATOR + std::string(value_str) + KEY_SEPARATOR;
 
-    for (auto cursor = fvo_col_->seek_raw(ctx_, fvo_prefix); cursor->is_valid() && cursor->key().starts_with(fvo_prefix); cursor->next()) {
-        std::string_view key_view = cursor->key();
+    for (const auto& record : fvo_col_->get_critbit_tree().range(ctx_, fvo_prefix)) {
+        std::string_view key_view = record.key_view();
         std::string_view id_part = key_view.substr(fvo_prefix.length());
         if (id_part.length() == GraphTransaction::BINARY_U32_SIZE) {
             roaring_bitmap_add(target_bitmap, from_binary_key_u32(id_part));
@@ -313,9 +321,15 @@ void GraphReader::get_objects_by_property_range_into_roaring(std::string_view fi
     to_binary_key_buf(end_numeric_val, end_val_buf, sizeof(end_val_buf));
     std::string end_key_exclusive = std::string(field_name) + KEY_SEPARATOR + std::string(end_val_buf, sizeof(end_val_buf)) + KEY_SEPARATOR + '\xff';
 
-    for (auto cursor = fvo_col_->seek_raw(ctx_, start_key, end_key_exclusive); cursor->is_valid(); cursor->next()) {
-        std::string_view key_view = cursor->key();
+    // Workaround for lack of end_key in range scans. We scan from the beginning of the partition (field_name)
+    // and manually filter.
+    std::string field_prefix = std::string(field_name) + KEY_SEPARATOR;
+    for (const auto& record : fvo_col_->get_critbit_tree().range(ctx_, field_prefix)) {
+        std::string_view key_view = record.key_view();
         
+        if (key_view < start_key) continue;
+        if (key_view >= end_key_exclusive) break;
+
         size_t expected_id_offset = field_name.length() + 1 + GraphTransaction::BINARY_U64_SIZE + 1;
         if (key_view.length() == expected_id_offset + GraphTransaction::BINARY_U32_SIZE) {
              std::string_view id_part = key_view.substr(expected_id_offset);
@@ -336,7 +350,7 @@ size_t GraphReader::count_objects_by_property(std::string_view field_name, std::
 size_t GraphReader::count_relationships_by_type(std::string_view relationship_field_name) {
     std::string fvo_rel_prefix = std::string(relationship_field_name) + KEY_SEPARATOR;
     size_t count = 0;
-    for (auto cursor = fvo_col_->seek_raw(ctx_, fvo_rel_prefix); cursor->is_valid() && cursor->key().starts_with(fvo_rel_prefix); cursor->next()) {
+    for (const auto& record : fvo_col_->get_critbit_tree().range(ctx_, fvo_rel_prefix)) {
         count++;
     }
     return count;
@@ -369,8 +383,8 @@ void GraphReader::get_outgoing_relationships_into_roaring(uint32_t source_obj_id
     prefix_buf[prefix_len++] = KEY_SEPARATOR;
     std::string_view prefix(prefix_buf, prefix_len);
 
-    for (auto cursor = ofv_col_->seek_raw(ctx_, prefix); cursor->is_valid() && cursor->key().starts_with(prefix); cursor->next()) {
-        std::string_view key_view = cursor->key();
+    for (const auto& record : ofv_col_->get_critbit_tree().range(ctx_, prefix)) {
+        std::string_view key_view = record.key_view();
         std::string_view id_part = key_view.substr(prefix.length());
         if (id_part.length() == GraphTransaction::BINARY_U32_SIZE) {
             roaring_bitmap_add(target_bitmap, from_binary_key_u32(id_part));
@@ -420,8 +434,8 @@ void GraphReader::get_incoming_relationships_for_many_into_roaring(roaring_bitma
         char target_id_buf[GraphTransaction::BINARY_U32_SIZE];
         to_binary_key_buf(target_id, target_id_buf, sizeof(target_id_buf));
         std::string prefix = std::string(relationship_field_name) + KEY_SEPARATOR + std::string(target_id_buf, sizeof(target_id_buf)) + KEY_SEPARATOR;
-        for (auto cursor = fvo_col_->seek_raw(ctx_, prefix); cursor->is_valid() && cursor->key().starts_with(prefix); cursor->next()) {
-            std::string_view key_view = cursor->key();
+        for (const auto& record : fvo_col_->get_critbit_tree().range(ctx_, prefix)) {
+            std::string_view key_view = record.key_view();
             std::string_view id_part = key_view.substr(prefix.length());
             if (id_part.length() == GraphTransaction::BINARY_U32_SIZE) {
                 roaring_bitmap_add(source_bitmap, from_binary_key_u32(id_part));
@@ -472,8 +486,8 @@ uint64_t GraphReader::count_triangles(std::string_view relationship_field_name) 
     if (!all_nodes) return 0;
 
     std::string prefix = std::string(relationship_field_name) + KEY_SEPARATOR;
-    for (auto cursor = fvo_col_->seek_raw(ctx_, prefix); cursor->is_valid() && cursor->key().starts_with(prefix); cursor->next()) {
-        std::string_view key = cursor->key();
+    for (const auto& record : fvo_col_->get_critbit_tree().range(ctx_, prefix)) {
+        std::string_view key = record.key_view();
         std::string_view remainder = key.substr(prefix.length());
         
         if (remainder.length() == GraphTransaction::BINARY_U32_SIZE + 1 + GraphTransaction::BINARY_U32_SIZE) {
@@ -775,9 +789,9 @@ void GraphTransaction::clear_object_properties(uint32_t obj_id) {
     prefix_buf[prefix_len++] = KEY_SEPARATOR;
     std::string_view prefix(prefix_buf, prefix_len);
 
-    for (auto cursor = ofv_col_->seek_raw(ctx_, prefix); cursor->is_valid() && cursor->key().starts_with(prefix); cursor->next()) {
-        std::string_view full_key = cursor->key();
-        std::string_view value_with_type = cursor->value();
+    for (const auto& record : ofv_col_->get_critbit_tree().range(ctx_, prefix)) {
+        std::string_view full_key = record.key_view();
+        std::string_view value_with_type = record.value_view();
         std::string_view field_name = full_key.substr(prefix.length());
         
         ofv_col_->remove(ctx_, ofv_batch_deltas_, full_key);

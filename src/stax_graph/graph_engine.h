@@ -27,7 +27,8 @@
 #include "stax_common/common_types.hpp"
 #include "stax_common/geohash.hpp"
 #include "stax_common/binary_utils.h"
-#include "stax_common/roaring.h" // BUG FIX: Added missing include
+#include "stax_common/roaring.h"
+#include "stax_core/stax_tree.hpp"
 
 class GraphTransaction;
 class GraphReader;
@@ -55,7 +56,8 @@ class IndexScanOperator : public QueryOperator
 private:
     Collection *col_;
     const TxnContext &ctx_;
-    std::unique_ptr<DBCursor> cursor_;
+    std::unique_ptr<StaxTree::Cursor> iterator_;
+    std::unique_ptr<StaxTree::Cursor> end_iterator_;
     std::string key_prefix_;
 
 public:
@@ -71,7 +73,8 @@ private:
     const TxnContext &ctx_;
     uint32_t source_id_;
     std::string_view field_name_;
-    std::unique_ptr<DBCursor> cursor_;
+    std::unique_ptr<StaxTree::Cursor> iterator_;
+    std::unique_ptr<StaxTree::Cursor> end_iterator_;
     std::string key_prefix_;
 
 public:
