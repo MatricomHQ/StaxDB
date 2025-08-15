@@ -63,15 +63,49 @@ public:
     std::optional<RecordData> get(const TxnContext &ctx, std::string_view key) const;
     void remove(ThreadLocalAllocator& local_alloc, const TxnContext &ctx, std::string_view key);
 
+    class Cursor {
+    public:
+        using iterator_category = std::input_iterator_tag;
+        using value_type = RecordData;
+        using difference_type = std::ptrdiff_t;
+        using pointer = const RecordData*;
+        using reference = const RecordData&;
+
+        Cursor& operator++();
+        reference operator*() const;
+        pointer operator->() const;
+        bool operator!=(const Cursor& other) const;
+        bool operator==(const Cursor& other) const;
+
+        Cursor& begin();
+        Cursor end();
+
+    private:
+        friend class StaxTree;
+        Cursor(const StaxTree* tree, const TxnContext& ctx, std::string_view prefix, bool is_end = false);
+        Cursor(const StaxTree* tree, const TxnContext& ctx, std::string_view prefix, uint64_t start_ts, uint64_t end_ts, bool is_end = false);
+
+        void advance();
+        StaxRecord* get_visible_record(uint64_t head_record_offset) const;
+        bool check_timestamp(std::string_view key) const;
+
+        const StaxTree* tree_;
+        TxnContext ctx_;
+        std::string_view prefix_;
+        std::optional<uint64_t> start_ts_;
+        std::optional<uint64_t> end_ts_;
+
+        std::stack<uint64_t> to_visit_;
+        std::optional<RecordData> current_record_;
+        bool is_end_sentinel_ = false;
+    };
+
+    Cursor range(const TxnContext& ctx, std::string_view prefix) const;
+    Cursor range(const TxnContext& ctx, std::string_view prefix, uint64_t start_ts, uint64_t end_ts) const;
+
     // Stubs for API compatibility
     void insert_batch(const TxnContext &ctx, const CoreKVPair *kv_pairs, size_t num_kvs, TransactionBatch &batch) {
         throw std::runtime_error("insert_batch not implemented in new tree");
-    }
-    void seek(std::string_view start_key, std::stack<uint64_t, std::vector<uint64_t>> &path_stack) const {
-        throw std::runtime_error("seek not implemented in new tree");
-    }
-    void find_leaf_nodes_in_range(std::string_view prefix, std::vector<uint64_t> &leaf_nodes) const {
-        throw std::runtime_error("find_leaf_nodes_in_range not implemented in new tree");
     }
     void multi_get_simd(const TxnContext &ctx, const std::vector<std::string_view> &keys, std::vector<std::optional<RecordData>> &results) const {
          results.reserve(keys.size());

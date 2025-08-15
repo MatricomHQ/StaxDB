@@ -179,3 +179,207 @@ int StaxTree::find_first_differing_nibble(std::string_view k1, std::string_view 
     // If one key is a prefix of the other
     return (len1 == len2) ? -1 : min_len * 2;
 }
+
+
+// --- StaxTree::Cursor Implementation ---
+
+// Helper function for numerical range scans
+static uint64_t big_endian_str_to_uint64(std::string_view s) {
+    if (s.length() != 8) {
+        // This can happen if a key shares the prefix but isn't a valid numerical key.
+        // Return a value that will fail the range check.
+        return std::numeric_limits<uint64_t>::max();
+    }
+    uint64_t val = 0;
+    val |= static_cast<uint64_t>(static_cast<uint8_t>(s[0])) << 56;
+    val |= static_cast<uint64_t>(static_cast<uint8_t>(s[1])) << 48;
+    val |= static_cast<uint64_t>(static_cast<uint8_t>(s[2])) << 40;
+    val |= static_cast<uint64_t>(static_cast<uint8_t>(s[3])) << 32;
+    val |= static_cast<uint64_t>(static_cast<uint8_t>(s[4])) << 24;
+    val |= static_cast<uint64_t>(static_cast<uint8_t>(s[5])) << 16;
+    val |= static_cast<uint64_t>(static_cast<uint8_t>(s[6])) << 8;
+    val |= static_cast<uint64_t>(static_cast<uint8_t>(s[7]));
+    return val;
+}
+
+
+StaxTree::Cursor::Cursor(const StaxTree* tree, const TxnContext& ctx, std::string_view prefix, bool is_end)
+    : tree_(tree), ctx_(ctx), prefix_(prefix), is_end_sentinel_(is_end) {
+    if (is_end_sentinel_) {
+        return;
+    }
+
+    uint64_t current_ptr = tree_->root_ptr_.load(std::memory_order_acquire);
+    if (current_ptr == 0) {
+        is_end_sentinel_ = true; // Tree is empty
+        return;
+    }
+
+    // Navigate to the starting node for the prefix scan
+    while (current_ptr != 0 && !is_leaf(current_ptr)) {
+        InternalNode* node = tree_->allocator_.get_ptr<InternalNode>(current_ptr);
+        if (node->test_nibble_idx >= prefix.length() * 2) {
+            break; // The whole subtree from here is potentially part of the range
+        }
+        int nibble = get_nibble_at(prefix, node->test_nibble_idx);
+        current_ptr = node->children[nibble].load(std::memory_order_relaxed);
+    }
+
+    if (current_ptr != 0) {
+        to_visit_.push(current_ptr);
+    }
+
+    advance(); // Find the first element
+}
+
+StaxTree::Cursor::Cursor(const StaxTree* tree, const TxnContext& ctx, std::string_view prefix, uint64_t start_ts, uint64_t end_ts, bool is_end)
+    : tree_(tree), ctx_(ctx), prefix_(prefix), start_ts_(start_ts), end_ts_(end_ts), is_end_sentinel_(is_end) {
+     if (is_end_sentinel_) {
+        return;
+    }
+    // The traversal logic is the same as the prefix-only scan; the timestamp check is done during iteration.
+    uint64_t current_ptr = tree_->root_ptr_.load(std::memory_order_acquire);
+    if (current_ptr == 0) {
+        is_end_sentinel_ = true;
+        return;
+    }
+    while (current_ptr != 0 && !is_leaf(current_ptr)) {
+        InternalNode* node = tree_->allocator_.get_ptr<InternalNode>(current_ptr);
+        if (node->test_nibble_idx >= prefix.length() * 2) {
+            break;
+        }
+        int nibble = get_nibble_at(prefix, node->test_nibble_idx);
+        current_ptr = node->children[nibble].load(std::memory_order_relaxed);
+    }
+    if (current_ptr != 0) {
+        to_visit_.push(current_ptr);
+    }
+    advance();
+}
+
+void StaxTree::Cursor::advance() {
+    current_record_ = std::nullopt;
+
+    while (!to_visit_.empty()) {
+        uint64_t path_ptr = to_visit_.top();
+        to_visit_.pop();
+
+        if (is_leaf(path_ptr)) {
+            uint64_t head_offset = get_offset(path_ptr);
+            StaxRecord* head_record = tree_->allocator_.get_ptr<StaxRecord>(head_offset);
+            std::string_view key = head_record->get_key();
+
+            // 1. Check if the key has the correct prefix
+            if (key.rfind(prefix_, 0) != 0) {
+                continue;
+            }
+
+            // 2. If it's a timestamp query, check the range
+            if (start_ts_ && !check_timestamp(key)) {
+                continue;
+            }
+
+            // 3. Find the visible version of the record
+            StaxRecord* visible_record = get_visible_record(head_offset);
+
+            if (visible_record) {
+                // Found a valid, visible record.
+                RecordData data;
+                data.key_ptr = visible_record->get_key_data();
+                data.key_len = visible_record->key_len;
+                data.value_ptr = visible_record->get_value_data();
+                data.value_len = visible_record->value_len;
+                data.txn_id = visible_record->txn_id;
+                data.prev_version_offset = visible_record->prev_version_offset;
+                data.is_deleted = visible_record->is_deleted;
+                current_record_ = data;
+                return; // Found an item, stop advancing
+            }
+        } else { // It's an internal node
+            InternalNode* node = tree_->allocator_.get_ptr<InternalNode>(path_ptr);
+            // Push children in reverse order to visit them lexicographically
+            for (int i = 15; i >= 0; --i) {
+                uint64_t child_ptr = node->children[i].load(std::memory_order_relaxed);
+                if (child_ptr != 0) {
+                    to_visit_.push(child_ptr);
+                }
+            }
+        }
+    }
+
+    // If we get here, the traversal is complete.
+    is_end_sentinel_ = true;
+}
+
+StaxRecord* StaxTree::Cursor::get_visible_record(uint64_t head_record_offset) const {
+    uint64_t current_offset = head_record_offset;
+    while (current_offset != 0) {
+        StaxRecord* record = tree_->allocator_.get_ptr<StaxRecord>(current_offset);
+        if (record->txn_id <= ctx_.read_snapshot_id) {
+            if (record->is_deleted) return nullptr; // Found a tombstone
+            return record; // Found a visible version
+        }
+        current_offset = record->prev_version_offset;
+    }
+    return nullptr; // No visible version found
+}
+
+bool StaxTree::Cursor::check_timestamp(std::string_view key) const {
+    const size_t expected_key_len = prefix_.length() + sizeof(uint64_t);
+    if (key.length() != expected_key_len) {
+        return false;
+    }
+    std::string_view ts_sv = key.substr(prefix_.length());
+    uint64_t timestamp = big_endian_str_to_uint64(ts_sv);
+    return timestamp >= *start_ts_ && timestamp <= *end_ts_;
+}
+
+
+// --- Iterator Methods ---
+StaxTree::Cursor& StaxTree::Cursor::operator++() {
+    advance();
+    return *this;
+}
+
+StaxTree::Cursor::reference StaxTree::Cursor::operator*() const {
+    return *current_record_;
+}
+
+StaxTree::Cursor::pointer StaxTree::Cursor::operator->() const {
+    return &(*current_record_);
+}
+
+bool StaxTree::Cursor::operator!=(const Cursor& other) const {
+    // Two iterators are different if one is the end sentinel and the other is not.
+    return is_end_sentinel_ != other.is_end_sentinel_;
+}
+
+bool StaxTree::Cursor::operator==(const Cursor& other) const {
+    return is_end_sentinel_ == other.is_end_sentinel_;
+}
+
+
+// --- Range-based for loop support ---
+StaxTree::Cursor& StaxTree::Cursor::begin() {
+    return *this;
+}
+
+StaxTree::Cursor StaxTree::Cursor::end() {
+    // Return a new cursor that is explicitly an end sentinel.
+    if (start_ts_) {
+        return Cursor(tree_, ctx_, prefix_, *start_ts_, *end_ts_, true);
+    } else {
+        return Cursor(tree_, ctx_, prefix_, true);
+    }
+}
+
+
+// --- StaxTree range() methods ---
+
+StaxTree::Cursor StaxTree::range(const TxnContext& ctx, std::string_view prefix) const {
+    return Cursor(this, ctx, prefix);
+}
+
+StaxTree::Cursor StaxTree::range(const TxnContext& ctx, std::string_view prefix, uint64_t start_ts, uint64_t end_ts) const {
+    return Cursor(this, ctx, prefix, start_ts, end_ts);
+}

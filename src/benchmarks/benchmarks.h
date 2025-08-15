@@ -32,6 +32,7 @@
 #include "benchmarks/complex_query_bench.h"
 #include "benchmarks/core_vs_maps.h" 
 #include "benchmarks/tree_bench.h"
+#include "benchmarks/range_scan_bench.h"
 #include "tpcc.h" 
 
 
@@ -48,6 +49,8 @@ void run_all_benchmarks() {
     
     TreeBench::run_tree_stress_test();
 
+    RangeScanBench::run_prefix_range_benchmark();
+    RangeScanBench::run_numerical_range_benchmark();
     
     CoreVsMapsBench::run_stax_vs_maps_suite();
     
