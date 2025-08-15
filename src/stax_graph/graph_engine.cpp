@@ -1,5 +1,4 @@
 #include "stax_graph/graph_engine.h"
-#include "stax_tx/db_cursor.hpp"
 #include "stax_common/binary_utils.h"
 #include <cassert>
 #include <stdexcept>
@@ -33,7 +32,7 @@ bool QueryPipeline::next(uint32_t &out_id)
 }
 
 IndexScanOperator::IndexScanOperator(Collection *col, const TxnContext &ctx, std::string_view field_name, std::string_view value)
-    : col_(col), ctx_(ctx)
+    : col_(col), ctx_(ctx), current_result_idx_(0)
 {
     key_prefix_ = std::string(field_name) + KEY_SEPARATOR + std::string(value) + KEY_SEPARATOR;
     reset();
@@ -41,15 +40,16 @@ IndexScanOperator::IndexScanOperator(Collection *col, const TxnContext &ctx, std
 
 bool IndexScanOperator::next(uint32_t &out_id)
 {
-    if (cursor_ && cursor_->is_valid())
+    if (current_result_idx_ < results_.size())
     {
-        std::string_view key = cursor_->key();
+        StaxRecord* record = results_[current_result_idx_];
+        std::string_view key = record->get_key();
         if (key.starts_with(key_prefix_))
         {
             std::string_view id_part = key.substr(key_prefix_.length());
             if (id_part.length() == GraphTransaction::BINARY_U32_SIZE) {
                 out_id = from_binary_key_u32(id_part);
-                cursor_->next();
+                current_result_idx_++;
                 return true;
             }
         }
@@ -59,11 +59,12 @@ bool IndexScanOperator::next(uint32_t &out_id)
 
 void IndexScanOperator::reset()
 {
-    cursor_ = col_->seek(ctx_, key_prefix_);
+    results_ = col_->range(ctx_, key_prefix_);
+    current_result_idx_ = 0;
 }
 
 ForwardScanOperator::ForwardScanOperator(Collection *col, const TxnContext &ctx, uint32_t source_id, std::string_view field_name)
-    : col_(col), ctx_(ctx), source_id_(source_id), field_name_(field_name)
+    : col_(col), ctx_(ctx), source_id_(source_id), field_name_(field_name), current_result_idx_(0)
 {
     char prefix_buf[GraphTransaction::BINARY_U32_SIZE + 1 + 1 + 1];
     size_t key_len = to_binary_key_buf(source_id_, prefix_buf, sizeof(prefix_buf));
@@ -77,16 +78,17 @@ ForwardScanOperator::ForwardScanOperator(Collection *col, const TxnContext &ctx,
 
 bool ForwardScanOperator::next(uint32_t &out_id)
 {
-    if (cursor_ && cursor_->is_valid())
+    if (current_result_idx_ < results_.size())
     {
-        std::string_view key = cursor_->key();
+        StaxRecord* record = results_[current_result_idx_];
+        std::string_view key = record->get_key();
 
         if (key.starts_with(key_prefix_))
         {
             std::string_view id_part = key.substr(key_prefix_.length());
              if (id_part.length() == GraphTransaction::BINARY_U32_SIZE) {
                 out_id = from_binary_key_u32(id_part);
-                cursor_->next();
+                current_result_idx_++;
                 return true;
             }
         }
@@ -96,7 +98,8 @@ bool ForwardScanOperator::next(uint32_t &out_id)
 
 void ForwardScanOperator::reset()
 {
-    cursor_ = col_->seek(ctx_, key_prefix_);
+    results_ = col_->range(ctx_, key_prefix_);
+    current_result_idx_ = 0;
 }
 
 IntersectOperator::IntersectOperator(std::unique_ptr<QueryOperator> left, std::unique_ptr<QueryOperator> right)
@@ -152,10 +155,10 @@ std::vector<std::tuple<uint32_t, std::string, std::string>> GraphReader::get_pro
 
     std::vector<std::tuple<uint32_t, std::string, std::string>> results;
 
-    for (auto cursor = ofv_col_->seek(ctx_, prefix); cursor->is_valid() && cursor->key().starts_with(prefix); cursor->next())
+    for (auto record : ofv_col_->range(ctx_, prefix))
     {
-        std::string_view key_view = cursor->key();
-        std::string_view value_view_sv(cursor->value());
+        std::string_view key_view = record->get_key();
+        std::string_view value_view_sv(record->get_value_data(), record->value_len);
 
         std::string_view rest_of_key = key_view.substr(prefix.length());
         
@@ -186,10 +189,10 @@ std::vector<std::tuple<uint32_t, std::string, std::string, StaxValueType>> Graph
 
     std::vector<std::tuple<uint32_t, std::string, std::string, StaxValueType>> results;
 
-    for (auto cursor = ofv_col_->seek(ctx_, prefix); cursor->is_valid() && cursor->key().starts_with(prefix); cursor->next())
+    for (auto record : ofv_col_->range(ctx_, prefix))
     {
-        std::string_view key_view = cursor->key();
-        std::string_view value_view_sv(cursor->value());
+        std::string_view key_view = record->get_key();
+        std::string_view value_view_sv(record->get_value_data(), record->value_len);
 
         std::string_view rest_of_key = key_view.substr(prefix.length());
         
@@ -232,9 +235,9 @@ std::optional<DataView> GraphReader::get_property_for_object_direct(uint32_t obj
     std::string_view key(key_buf, key_len);
 
     auto result = ofv_col_->get(ctx_, key);
-    if (result && result->value_len > 0)
+    if (result)
     {
-        return DataView(result->value_ptr, result->value_len);
+        return DataView(result->get_value_data(), result->value_len);
     }
     return std::nullopt;
 }
@@ -261,8 +264,8 @@ std::optional<uint64_t> GraphReader::get_property_for_object_numeric(uint32_t ob
 
 std::set<std::string> GraphReader::get_all_relationship_types() {
     std::set<std::string> rel_types;
-    for (auto cursor = fvo_col_->seek_first(ctx_); cursor->is_valid(); cursor->next()) {
-        std::string_view key = cursor->key();
+    for (auto record : fvo_col_->range(ctx_, "")) {
+        std::string_view key = record->get_key();
         size_t first_sep = key.find(KEY_SEPARATOR);
         if (first_sep != std::string_view::npos) {
             rel_types.insert(std::string(key.substr(0, first_sep)));
@@ -293,8 +296,8 @@ void GraphReader::get_objects_by_property_into_roaring(std::string_view field_na
 
     std::string fvo_prefix = std::string(field_name) + KEY_SEPARATOR + std::string(value_str) + KEY_SEPARATOR;
 
-    for (auto cursor = fvo_col_->seek_raw(ctx_, fvo_prefix); cursor->is_valid() && cursor->key().starts_with(fvo_prefix); cursor->next()) {
-        std::string_view key_view = cursor->key();
+    for (auto record : fvo_col_->range(ctx_, fvo_prefix)) {
+        std::string_view key_view = record->get_key();
         std::string_view id_part = key_view.substr(fvo_prefix.length());
         if (id_part.length() == GraphTransaction::BINARY_U32_SIZE) {
             roaring_bitmap_add(target_bitmap, from_binary_key_u32(id_part));
@@ -305,16 +308,10 @@ void GraphReader::get_objects_by_property_into_roaring(std::string_view field_na
 void GraphReader::get_objects_by_property_range_into_roaring(std::string_view field_name, uint64_t start_numeric_val, uint64_t end_numeric_val, roaring_bitmap_t* target_bitmap) {
     if (!target_bitmap) return;
 
-    char start_val_buf[GraphTransaction::BINARY_U64_SIZE];
-    to_binary_key_buf(start_numeric_val, start_val_buf, sizeof(start_val_buf));
-    std::string start_key = std::string(field_name) + KEY_SEPARATOR + std::string(start_val_buf, sizeof(start_val_buf)) + KEY_SEPARATOR;
+    std::string prefix = std::string(field_name) + KEY_SEPARATOR;
 
-    char end_val_buf[GraphTransaction::BINARY_U64_SIZE];
-    to_binary_key_buf(end_numeric_val, end_val_buf, sizeof(end_val_buf));
-    std::string end_key_exclusive = std::string(field_name) + KEY_SEPARATOR + std::string(end_val_buf, sizeof(end_val_buf)) + KEY_SEPARATOR + '\xff';
-
-    for (auto cursor = fvo_col_->seek_raw(ctx_, start_key, end_key_exclusive); cursor->is_valid(); cursor->next()) {
-        std::string_view key_view = cursor->key();
+    for (auto record : fvo_col_->range(ctx_, prefix, start_numeric_val, end_numeric_val)) {
+        std::string_view key_view = record->get_key();
         
         size_t expected_id_offset = field_name.length() + 1 + GraphTransaction::BINARY_U64_SIZE + 1;
         if (key_view.length() == expected_id_offset + GraphTransaction::BINARY_U32_SIZE) {
@@ -335,11 +332,7 @@ size_t GraphReader::count_objects_by_property(std::string_view field_name, std::
 
 size_t GraphReader::count_relationships_by_type(std::string_view relationship_field_name) {
     std::string fvo_rel_prefix = std::string(relationship_field_name) + KEY_SEPARATOR;
-    size_t count = 0;
-    for (auto cursor = fvo_col_->seek_raw(ctx_, fvo_rel_prefix); cursor->is_valid() && cursor->key().starts_with(fvo_rel_prefix); cursor->next()) {
-        count++;
-    }
-    return count;
+    return fvo_col_->range(ctx_, fvo_rel_prefix).size();
 }
 
 std::vector<uint32_t> GraphReader::get_outgoing_relationships(uint32_t source_obj_id, std::string_view relationship_field_name) {
@@ -369,8 +362,8 @@ void GraphReader::get_outgoing_relationships_into_roaring(uint32_t source_obj_id
     prefix_buf[prefix_len++] = KEY_SEPARATOR;
     std::string_view prefix(prefix_buf, prefix_len);
 
-    for (auto cursor = ofv_col_->seek_raw(ctx_, prefix); cursor->is_valid() && cursor->key().starts_with(prefix); cursor->next()) {
-        std::string_view key_view = cursor->key();
+    for (auto record : ofv_col_->range(ctx_, prefix)) {
+        std::string_view key_view = record->get_key();
         std::string_view id_part = key_view.substr(prefix.length());
         if (id_part.length() == GraphTransaction::BINARY_U32_SIZE) {
             roaring_bitmap_add(target_bitmap, from_binary_key_u32(id_part));
@@ -420,8 +413,8 @@ void GraphReader::get_incoming_relationships_for_many_into_roaring(roaring_bitma
         char target_id_buf[GraphTransaction::BINARY_U32_SIZE];
         to_binary_key_buf(target_id, target_id_buf, sizeof(target_id_buf));
         std::string prefix = std::string(relationship_field_name) + KEY_SEPARATOR + std::string(target_id_buf, sizeof(target_id_buf)) + KEY_SEPARATOR;
-        for (auto cursor = fvo_col_->seek_raw(ctx_, prefix); cursor->is_valid() && cursor->key().starts_with(prefix); cursor->next()) {
-            std::string_view key_view = cursor->key();
+        for (auto record : fvo_col_->range(ctx_, prefix)) {
+            std::string_view key_view = record->get_key();
             std::string_view id_part = key_view.substr(prefix.length());
             if (id_part.length() == GraphTransaction::BINARY_U32_SIZE) {
                 roaring_bitmap_add(source_bitmap, from_binary_key_u32(id_part));
@@ -472,8 +465,8 @@ uint64_t GraphReader::count_triangles(std::string_view relationship_field_name) 
     if (!all_nodes) return 0;
 
     std::string prefix = std::string(relationship_field_name) + KEY_SEPARATOR;
-    for (auto cursor = fvo_col_->seek_raw(ctx_, prefix); cursor->is_valid() && cursor->key().starts_with(prefix); cursor->next()) {
-        std::string_view key = cursor->key();
+    for (auto record : fvo_col_->range(ctx_, prefix)) {
+        std::string_view key = record->get_key();
         std::string_view remainder = key.substr(prefix.length());
         
         if (remainder.length() == GraphTransaction::BINARY_U32_SIZE + 1 + GraphTransaction::BINARY_U32_SIZE) {
@@ -541,26 +534,19 @@ bool GraphReader::has_relationship(uint32_t source_obj_id, std::string_view rela
     key_buf[key_len++] = KEY_SEPARATOR;
     key_len += to_binary_key_buf(target_obj_id, key_buf + key_len, sizeof(key_buf) - key_len);
     std::string_view key(key_buf, key_len);
-    return ofv_col_->get(ctx_, key).has_value();
+    return ofv_col_->get(ctx_, key) != nullptr;
 }
 
 static const char FVO_PLACEHOLDER_VALUE = '1';
 
 GraphTransaction::GraphTransaction(::Database* db, size_t thread_id)
     : db_(db), thread_id_(thread_id),
-      ctx_(db->begin_transaction_context(thread_id, false)),
-      ofv_kv_data_buffer_(std::make_unique<char[]>(MAX_BATCH_KEY_DATA_SIZE)),
-      fvo_kv_data_buffer_(std::make_unique<char[]>(MAX_BATCH_KEY_DATA_SIZE)),
-      ofv_kv_pairs_array_(std::make_unique<CoreKVPair[]>(MAX_KV_PAIRS_PER_BATCH)),
-      fvo_kv_pairs_array_(std::make_unique<CoreKVPair[]>(MAX_KV_PAIRS_PER_BATCH)) {
+      ctx_(db->begin_transaction_context(thread_id, false))
+{
     ofv_col_ = db_->get_ofv_collection();
     fvo_col_ = db_->get_fvo_collection();
     if (ofv_col_) ofv_col_idx_ = ofv_col_->get_id();
     if (fvo_col_) fvo_col_idx_ = fvo_col_->get_id();
-    ofv_data_offset_ = 0;
-    ofv_kv_pairs_count_ = 0;
-    fvo_data_offset_ = 0;
-    fvo_kv_pairs_count_ = 0;
 }
 
 GraphTransaction::~GraphTransaction() { if (!is_finished_) abort(); }
@@ -580,7 +566,7 @@ void GraphTransaction::insert_fact(uint32_t obj_id, std::string_view field_name,
     ofv_key += field_name;
     ofv_key += KEY_SEPARATOR;
     ofv_key += to_binary_key(val_id);
-    ofv_col_->insert(ctx_, ofv_batch_deltas_, ofv_key, std::string_view(&FVO_PLACEHOLDER_VALUE, 1));
+    ofv_col_->insert(ctx_, ofv_key, std::string_view(&FVO_PLACEHOLDER_VALUE, 1));
 
     // FVO
     std::string fvo_key = std::string(field_name);
@@ -588,7 +574,7 @@ void GraphTransaction::insert_fact(uint32_t obj_id, std::string_view field_name,
     fvo_key += to_binary_key(val_id);
     fvo_key += KEY_SEPARATOR;
     fvo_key += to_binary_key(obj_id);
-    fvo_col_->insert(ctx_, fvo_batch_deltas_, fvo_key, std::string_view(&FVO_PLACEHOLDER_VALUE, 1));
+    fvo_col_->insert(ctx_, fvo_key, std::string_view(&FVO_PLACEHOLDER_VALUE, 1));
 
     has_writes_ = true;
 }
@@ -607,7 +593,7 @@ void GraphTransaction::insert_fact_string(uint32_t obj_id, std::string_view fiel
     ofv_val.reserve(1 + value_str.length());
     ofv_val += StaxValueType::String;
     ofv_val += value_str;
-    ofv_col_->insert(ctx_, ofv_batch_deltas_, ofv_key, ofv_val);
+    ofv_col_->insert(ctx_, ofv_key, ofv_val);
 
     // FVO
     std::string fvo_key = std::string(field_name);
@@ -615,7 +601,7 @@ void GraphTransaction::insert_fact_string(uint32_t obj_id, std::string_view fiel
     fvo_key += value_str;
     fvo_key += KEY_SEPARATOR;
     fvo_key += to_binary_key(obj_id);
-    fvo_col_->insert(ctx_, fvo_batch_deltas_, fvo_key, std::string_view(&FVO_PLACEHOLDER_VALUE, 1));
+    fvo_col_->insert(ctx_, fvo_key, std::string_view(&FVO_PLACEHOLDER_VALUE, 1));
 
     has_writes_ = true;
 }
@@ -634,7 +620,7 @@ void GraphTransaction::insert_fact_numeric(uint32_t obj_id, std::string_view fie
     ofv_val.reserve(1 + BINARY_U64_SIZE);
     ofv_val += StaxValueType::Numeric;
     ofv_val += to_binary_key(numeric_val);
-    ofv_col_->insert(ctx_, ofv_batch_deltas_, ofv_key, ofv_val);
+    ofv_col_->insert(ctx_, ofv_key, ofv_val);
     
     // FVO
     std::string fvo_key = std::string(field_name);
@@ -642,7 +628,7 @@ void GraphTransaction::insert_fact_numeric(uint32_t obj_id, std::string_view fie
     fvo_key += to_binary_key(numeric_val);
     fvo_key += KEY_SEPARATOR;
     fvo_key += to_binary_key(obj_id);
-    fvo_col_->insert(ctx_, fvo_batch_deltas_, fvo_key, std::string_view(&FVO_PLACEHOLDER_VALUE, 1));
+    fvo_col_->insert(ctx_, fvo_key, std::string_view(&FVO_PLACEHOLDER_VALUE, 1));
 
     has_writes_ = true;
 }
@@ -661,7 +647,7 @@ void GraphTransaction::remove_fact(uint32_t obj_id, std::string_view field_name,
     ofv_key += field_name;
     ofv_key += KEY_SEPARATOR;
     ofv_key += to_binary_key(val_id);
-    ofv_col_->remove(ctx_, ofv_batch_deltas_, ofv_key);
+    ofv_col_->remove(ctx_, ofv_key);
 
     // FVO
     std::string fvo_key = std::string(field_name);
@@ -669,7 +655,7 @@ void GraphTransaction::remove_fact(uint32_t obj_id, std::string_view field_name,
     fvo_key += to_binary_key(val_id);
     fvo_key += KEY_SEPARATOR;
     fvo_key += to_binary_key(obj_id);
-    fvo_col_->remove(ctx_, fvo_batch_deltas_, fvo_key);
+    fvo_col_->remove(ctx_, fvo_key);
     
     has_writes_ = true;
 }
@@ -682,7 +668,7 @@ void GraphTransaction::remove_fact(uint32_t obj_id, std::string_view field_name,
     ofv_key += OFV_PROPERTY_PREFIX;
     ofv_key += KEY_SEPARATOR;
     ofv_key += field_name;
-    ofv_col_->remove(ctx_, ofv_batch_deltas_, ofv_key);
+    ofv_col_->remove(ctx_, ofv_key);
 
     // FVO
     std::string fvo_key = std::string(field_name);
@@ -690,7 +676,7 @@ void GraphTransaction::remove_fact(uint32_t obj_id, std::string_view field_name,
     fvo_key += value_str;
     fvo_key += KEY_SEPARATOR;
     fvo_key += to_binary_key(obj_id);
-    fvo_col_->remove(ctx_, fvo_batch_deltas_, fvo_key);
+    fvo_col_->remove(ctx_, fvo_key);
 
     has_writes_ = true;
 }
@@ -703,7 +689,7 @@ void GraphTransaction::remove_fact_numeric(uint32_t obj_id, std::string_view fie
     ofv_key += OFV_PROPERTY_PREFIX;
     ofv_key += KEY_SEPARATOR;
     ofv_key += field_name;
-    ofv_col_->remove(ctx_, ofv_batch_deltas_, ofv_key);
+    ofv_col_->remove(ctx_, ofv_key);
 
     // FVO
     std::string fvo_key = std::string(field_name);
@@ -711,7 +697,7 @@ void GraphTransaction::remove_fact_numeric(uint32_t obj_id, std::string_view fie
     fvo_key += to_binary_key(numeric_val);
     fvo_key += KEY_SEPARATOR;
     fvo_key += to_binary_key(obj_id);
-    fvo_col_->remove(ctx_, fvo_batch_deltas_, fvo_key);
+    fvo_col_->remove(ctx_, fvo_key);
     
     has_writes_ = true;
 }
@@ -775,50 +761,31 @@ void GraphTransaction::clear_object_properties(uint32_t obj_id) {
     prefix_buf[prefix_len++] = KEY_SEPARATOR;
     std::string_view prefix(prefix_buf, prefix_len);
 
-    for (auto cursor = ofv_col_->seek_raw(ctx_, prefix); cursor->is_valid() && cursor->key().starts_with(prefix); cursor->next()) {
-        std::string_view full_key = cursor->key();
-        std::string_view value_with_type = cursor->value();
+    for (auto record : ofv_col_->range(ctx_, prefix)) {
+        std::string_view full_key = record->get_key();
+        std::string_view value_with_type(record->get_value_data(), record->value_len);
         std::string_view field_name = full_key.substr(prefix.length());
         
-        ofv_col_->remove(ctx_, ofv_batch_deltas_, full_key);
+        ofv_col_->remove(ctx_, full_key);
 
         char value_type = value_with_type[0];
         std::string_view value_data = value_with_type.substr(1);
 
         if (value_type == StaxValueType::String) {
             std::string fvo_key = std::string(field_name) + KEY_SEPARATOR + std::string(value_data) + KEY_SEPARATOR + to_binary_key(obj_id);
-            fvo_col_->remove(ctx_, fvo_batch_deltas_, fvo_key);
+            fvo_col_->remove(ctx_, fvo_key);
         } else if (value_type == StaxValueType::Numeric || value_type == StaxValueType::Geo) {
             std::string fvo_key = std::string(field_name) + KEY_SEPARATOR + std::string(value_data) + KEY_SEPARATOR + to_binary_key(obj_id);
-            fvo_col_->remove(ctx_, fvo_batch_deltas_, fvo_key);
+            fvo_col_->remove(ctx_, fvo_key);
         }
     }
     has_writes_ = true;
 }
 
-void GraphTransaction::multi_insert_low_level_on_collection(::Collection* target_col, const TxnContext& ctx, TransactionBatch& batch, const CoreKVPair* kv_pairs, size_t num_kvs, uint64_t total_live_bytes_to_add) {
-    if (!target_col || num_kvs == 0) return;
-    target_col->get_critbit_tree().insert_batch(ctx, kv_pairs, num_kvs, batch);
-}
-
-void GraphTransaction::flush_pending_writes() {
-    if (ofv_kv_pairs_count_ > 0) {
-        multi_insert_low_level_on_collection(ofv_col_, ctx_, ofv_batch_deltas_, ofv_kv_pairs_array_.get(), ofv_kv_pairs_count_, 0);
-        ofv_kv_pairs_count_ = 0;
-        ofv_data_offset_ = 0;
-    }
-    if (fvo_kv_pairs_count_ > 0) {
-        multi_insert_low_level_on_collection(fvo_col_, ctx_, fvo_batch_deltas_, fvo_kv_pairs_array_.get(), fvo_kv_pairs_count_, 0);
-        fvo_kv_pairs_count_ = 0;
-        fvo_data_offset_ = 0;
-    }
-}
-
 void GraphTransaction::commit() {
     if (is_finished_) return;
-    flush_pending_writes();
-    ofv_col_->commit(ctx_, ofv_batch_deltas_);
-    fvo_col_->commit(ctx_, fvo_batch_deltas_);
+    ofv_col_->commit(ctx_);
+    fvo_col_->commit(ctx_);
     is_finished_ = true;
 }
 

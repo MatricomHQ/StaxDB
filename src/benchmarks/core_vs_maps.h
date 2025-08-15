@@ -262,10 +262,9 @@ inline void run_transactional_stax_benchmark(BenchResults& results, const std::s
             ::Collection& col = db->get_collection_by_idx(collection_idx); 
             for (const auto& item : thread_data[thread_idx]) {
                 TxnContext ctx = col.begin_transaction_context(thread_idx, false);
-                TransactionBatch batch;
                 total_insert_bytes.fetch_add(item.actual_stored_size_bytes, std::memory_order_relaxed);
-                col.insert(ctx, batch, item.key, item.value); 
-                col.commit(ctx, batch);
+                col.insert(ctx, item.key, item.value);
+                col.commit(ctx);
             }
         });
     }

@@ -53,7 +53,7 @@ void KVTransactionWrap::Insert(const Napi::CallbackInfo& info) {
     
     try {
         Collection& col = db_instance_->get_collection_by_idx(col_idx_);
-        col.insert(ctx_, batch_, key, value);
+        col.insert(ctx_, key, value);
     } catch (const std::exception& e) {
         Napi::Error::New(env, e.what()).ThrowAsJavaScriptException();
     }
@@ -69,7 +69,7 @@ void KVTransactionWrap::Remove(const Napi::CallbackInfo& info) {
 
     try {
         Collection& col = db_instance_->get_collection_by_idx(col_idx_);
-        col.remove(ctx_, batch_, key);
+        col.remove(ctx_, key);
     } catch (const std::exception& e) {
         Napi::Error::New(env, e.what()).ThrowAsJavaScriptException();
     }
@@ -84,7 +84,7 @@ void KVTransactionWrap::Commit(const Napi::CallbackInfo& info) {
     is_finished_ = true;
     try {
         Collection& col = db_instance_->get_collection_by_idx(col_idx_);
-        col.commit(ctx_, batch_);
+        col.commit(ctx_);
     } catch (const std::exception& e) {
         Napi::Error::New(env, e.what()).ThrowAsJavaScriptException();
     }

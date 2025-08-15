@@ -89,36 +89,34 @@ public:
         
         
         TxnContext item_ctx = col.begin_transaction_context(0, false); 
-        TransactionBatch item_batch;
         
         for(int i = 1; i <= NUM_ITEMS; ++i) {
-            col.insert(item_ctx, item_batch, item_key(i, "id"), std::to_string(i));
-            col.insert(item_ctx, item_batch, item_key(i, "im_id"), std::to_string(random.uniform_int(1, 10000)));
-            col.insert(item_ctx, item_batch, item_key(i, "name"), random.rand_astring(14, 24));
-            col.insert(item_ctx, item_batch, item_key(i, "price"), std::to_string(random.uniform_int(100, 10000) / 100.0));
+            col.insert(item_ctx, item_key(i, "id"), std::to_string(i));
+            col.insert(item_ctx, item_key(i, "im_id"), std::to_string(random.uniform_int(1, 10000)));
+            col.insert(item_ctx, item_key(i, "name"), random.rand_astring(14, 24));
+            col.insert(item_ctx, item_key(i, "price"), std::to_string(random.uniform_int(100, 10000) / 100.0));
         }
-        col.commit(item_ctx, item_batch);
+        col.commit(item_ctx);
         std::cout << "  - Items loaded." << std::endl;
 
         for(int w_id = 1; w_id <= num_warehouses_; ++w_id) {
             Collection& wh_col = db_->get_collection_by_idx(collection_idx_); 
             TxnContext wh_ctx = wh_col.begin_transaction_context(w_id % BENCHMARK_NUM_THREADS, false); 
-            TransactionBatch wh_batch;
 
-            wh_col.insert(wh_ctx, wh_batch, warehouse_key(w_id, "id"), std::to_string(w_id));
+            wh_col.insert(wh_ctx, warehouse_key(w_id, "id"), std::to_string(w_id));
             
             for(int i_id = 1; i_id <= NUM_ITEMS; ++i_id) {
-                wh_col.insert(wh_ctx, wh_batch, stock_key(w_id, i_id, "w_id"), std::to_string(w_id));
-                wh_col.insert(wh_ctx, wh_batch, stock_key(w_id, i_id, "i_id"), std::to_string(i_id));
-                wh_col.insert(wh_ctx, wh_batch, stock_key(w_id, i_id, "quantity"), std::to_string(random.uniform_int(10, 100)));
+                wh_col.insert(wh_ctx, stock_key(w_id, i_id, "w_id"), std::to_string(w_id));
+                wh_col.insert(wh_ctx, stock_key(w_id, i_id, "i_id"), std::to_string(i_id));
+                wh_col.insert(wh_ctx, stock_key(w_id, i_id, "quantity"), std::to_string(random.uniform_int(10, 100)));
             }
 
             for(int d_id = 1; d_id <= DISTRICTS_PER_WAREHOUSE; ++d_id) {
-                wh_col.insert(wh_ctx, wh_batch, district_key(w_id, d_id, "id"), std::to_string(d_id));
-                wh_col.insert(wh_ctx, wh_batch, district_key(w_id, d_id, "w_id"), std::to_string(w_id));
-                wh_col.insert(wh_ctx, wh_batch, district_key(w_id, d_id, "next_o_id"), std::to_string(ORDERS_PER_DISTRICT + 1));
+                wh_col.insert(wh_ctx, district_key(w_id, d_id, "id"), std::to_string(d_id));
+                wh_col.insert(wh_ctx, district_key(w_id, d_id, "w_id"), std::to_string(w_id));
+                wh_col.insert(wh_ctx, district_key(w_id, d_id, "next_o_id"), std::to_string(ORDERS_PER_DISTRICT + 1));
             }
-            wh_col.commit(wh_ctx, wh_batch);
+            wh_col.commit(wh_ctx);
             std::cout << "  - Warehouse " << w_id << " loaded." << std::endl;
         }
         std::cout << "TPC-C Loader: Data loading complete." << std::endl;
@@ -146,7 +144,6 @@ public:
         
         Collection& col = db_->get_collection_by_idx(collection_idx_);
         TxnContext ctx = col.begin_transaction_context(thread_id_, false); 
-        TransactionBatch batch;
         
         int32_t w_id = random_.uniform_int(1, num_warehouses_);
         int32_t d_id = random_.uniform_int(1, DISTRICTS_PER_WAREHOUSE);
@@ -155,13 +152,13 @@ public:
 
         auto next_o_id_opt = col.get(ctx, district_key(w_id, d_id, "next_o_id"));
         if(!next_o_id_opt) { col.abort(ctx); return; } 
-        int32_t o_id = std::stoi(std::string(next_o_id_opt->value_view()));
+        int32_t o_id = std::stoi(std::string(next_o_id_opt->get_value_data(), next_o_id_opt->value_len));
 
-        col.insert(ctx, batch, district_key(w_id, d_id, "next_o_id"), std::to_string(o_id + 1));
-        col.insert(ctx, batch, order_key(w_id, d_id, o_id, "id"), std::to_string(o_id));
-        col.insert(ctx, batch, order_key(w_id, d_id, o_id, "c_id"), std::to_string(c_id));
-        col.insert(ctx, batch, order_key(w_id, d_id, o_id, "ol_cnt"), std::to_string(ol_cnt));
-        col.insert(ctx, batch, new_order_key(w_id, d_id, o_id), "1"); 
+        col.insert(ctx, district_key(w_id, d_id, "next_o_id"), std::to_string(o_id + 1));
+        col.insert(ctx, order_key(w_id, d_id, o_id, "id"), std::to_string(o_id));
+        col.insert(ctx, order_key(w_id, d_id, o_id, "c_id"), std::to_string(c_id));
+        col.insert(ctx, order_key(w_id, d_id, o_id, "ol_cnt"), std::to_string(ol_cnt));
+        col.insert(ctx, new_order_key(w_id, d_id, o_id), "1");
         
         for(int i = 1; i <= ol_cnt; ++i) {
             int32_t i_id = random_.non_uniform_rand(8191, 1, NUM_ITEMS);
@@ -170,17 +167,17 @@ public:
 
             auto stock_quantity_opt = col.get(ctx, stock_key(w_id, i_id, "quantity"));
             if(!stock_quantity_opt) { col.abort(ctx); return; } 
-            int32_t s_quantity = std::stoi(std::string(stock_quantity_opt->value_view()));
+            int32_t s_quantity = std::stoi(std::string(stock_quantity_opt->get_value_data(), stock_quantity_opt->value_len));
 
             
             if(s_quantity > 10) s_quantity += random_.uniform_int(1, 10); 
             else s_quantity += 91 + random_.uniform_int(1, 10); 
             
-            col.insert(ctx, batch, stock_key(w_id, i_id, "quantity"), std::to_string(s_quantity));
-            col.insert(ctx, batch, order_line_key(w_id, d_id, o_id, i, "i_id"), std::to_string(i_id));
+            col.insert(ctx, stock_key(w_id, i_id, "quantity"), std::to_string(s_quantity));
+            col.insert(ctx, order_line_key(w_id, d_id, o_id, i, "i_id"), std::to_string(i_id));
         }
         
-        col.commit(ctx, batch);
+        col.commit(ctx);
         new_order_count_++;
     }
     

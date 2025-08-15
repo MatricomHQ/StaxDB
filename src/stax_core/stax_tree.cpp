@@ -232,25 +232,6 @@ std::vector<StaxRecord*> StaxTree16::range(const TxnContext &ctx, std::string_vi
 
 // --- Private Method Implementations ---
 
-bool StaxTree16::is_leaf(uint64_t ptr) {
-    return (ptr & LEAF_TAG) != 0;
-}
-
-uint64_t StaxTree16::get_offset(uint64_t ptr) {
-    return ptr & POINTER_MASK;
-}
-
-uint64_t StaxTree16::make_leaf_ptr(uint64_t record_byte_offset) {
-    return record_byte_offset | LEAF_TAG;
-}
-
-int StaxTree16::get_nibble_at(std::string_view key, uint32_t nibble_idx) {
-    size_t byte_idx = nibble_idx >> 1; // Faster division by 2
-    if (byte_idx >= key.length()) return 0;
-    uint8_t byte = key[byte_idx];
-    return (nibble_idx & 1) == 0 ? (byte >> 4) & 0x0F : byte & 0x0F; // Faster modulo 2
-}
-
 uint64_t StaxTree16::allocate_new_record(ThreadLocalAllocator& local_alloc, const TxnContext &ctx, std::string_view key, std::string_view value, bool is_delete, uint64_t prev_version_offset) {
     size_t total_size = sizeof(StaxRecord) + key.length() + value.length();
     uint64_t offset = local_alloc.allocate(total_size, alignof(StaxRecord));

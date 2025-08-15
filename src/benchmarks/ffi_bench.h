@@ -61,15 +61,14 @@ inline void run_ffi_style_benchmark(::Database* db) {
     std::cout << "\n--- Benchmarking Inserts (C++) ---" << std::endl;
     
     TxnContext insert_ctx = col.begin_transaction_context(0, false); 
-    TransactionBatch insert_batch; 
 
     auto start_insert = std::chrono::high_resolution_clock::now();
 
     for (int i = 0; i < num_items; ++i) {
-        col.insert(insert_ctx, insert_batch, data[i].Key, data[i].Value); 
+        col.insert(insert_ctx, data[i].Key, data[i].Value);
     }
     
-    col.commit(insert_ctx, insert_batch); 
+    col.commit(insert_ctx);
     auto end_insert = std::chrono::high_resolution_clock::now();
     auto insert_duration = std::chrono::duration_cast<std::chrono::nanoseconds>(end_insert - start_insert);
 
@@ -85,7 +84,7 @@ inline void run_ffi_style_benchmark(::Database* db) {
 
     for (int i = 0; i < num_items; ++i) {
         auto res = col.get(get_ctx, data[i].Key); 
-        if (!res || res->value_view() != data[i].Value) {
+        if (!res || std::string_view(res->get_value_data(), res->value_len) != data[i].Value) {
             std::cerr << "Get failed or value mismatch for key: " << data[i].Key << std::endl;
         }
     }

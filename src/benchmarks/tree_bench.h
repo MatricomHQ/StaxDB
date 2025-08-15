@@ -55,7 +55,7 @@ inline void run_tree_stress_test() {
     auto db = Database::create_new(db_dir, num_threads);
     uint32_t col_idx = db->get_collection("tree_stress_test");
     Collection& col = db->get_collection_by_idx(col_idx);
-    StaxTree& tree = col.get_critbit_tree();
+    StaxTree16& tree = col.get_critbit_tree();
     
     
     std::cout << "Generating test data..." << std::endl;
@@ -77,11 +77,12 @@ inline void run_tree_stress_test() {
     auto start_insert = std::chrono::high_resolution_clock::now();
     std::vector<std::thread> insert_threads;
     for (size_t i = 0; i < num_threads; ++i) {
-        insert_threads.emplace_back([&tree, &thread_data, thread_idx = i]() {
+        insert_threads.emplace_back([&db, &tree, &thread_data, thread_idx = i]() {
             
             TxnContext ctx = {1, 1, thread_idx}; 
+            ThreadLocalAllocator local_alloc(*db->get_global_allocator());
             for (const auto& item : thread_data[thread_idx]) {
-                tree.insert(ctx, item.key, item.value); 
+                tree.insert(local_alloc, ctx, item.key, item.value);
             }
         });
     }
@@ -107,7 +108,7 @@ inline void run_tree_stress_test() {
             TxnContext ctx = {2, 2, thread_idx}; 
             for (const auto& item : thread_data[thread_idx]) {
                 auto res = tree.get(ctx, item.key); 
-                if (res && res->value_view() == item.value) {
+                if (res && std::string_view(res->get_value_data(), res->value_len) == item.value) {
                     total_hits++;
                 } else {
                     total_misses++;

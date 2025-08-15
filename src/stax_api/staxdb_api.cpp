@@ -1,7 +1,6 @@
 #include "stax_api/staxdb_api.h"
 #include "stax_db/db.h"
 #include "stax_tx/transaction.h"
-#include "stax_tx/db_cursor.hpp"
 #include "stax_graph/graph_engine.h"
 #include "stax_common/roaring.h"
 #include "stax_common/binary_utils.h" 
@@ -216,8 +215,8 @@ StaxOptionalSlice staxdb_get(StaxDB db, StaxCollection collection_idx, StaxSlice
         Collection& col = db->db->get_collection_by_idx(collection_idx);
         TxnContext ctx = col.begin_transaction_context(0, true);
         auto record = col.get(ctx, to_string_view(key));
-        if (record.has_value()) {
-            value_buffer.assign(record->value_ptr, record->value_len);
+        if (record) {
+            value_buffer.assign(record->get_value_data(), record->value_len);
             return {{value_buffer.data(), value_buffer.length()}, true};
         }
         return {{nullptr, 0}, false};
@@ -237,11 +236,10 @@ void staxdb_insert_batch(StaxDB db, StaxCollection collection_idx, const StaxKVP
         Collection& col = cpp_db->get_collection_by_idx(collection_idx);
         
         TxnContext ctx = col.begin_transaction_context(0, false);
-        TransactionBatch batch;
         for (size_t i = 0; i < num_pairs; ++i) {
-            col.insert(ctx, batch, to_string_view(pairs[i].key), to_string_view(pairs[i].value));
+            col.insert(ctx, to_string_view(pairs[i].key), to_string_view(pairs[i].value));
         }
-        col.commit(ctx, batch);
+        col.commit(ctx);
 
     } catch (const std::exception& e) {
         set_last_error(e.what());
@@ -263,26 +261,30 @@ StaxResultSet staxdb_execute_range_query(Database* db_instance, StaxCollection c
         Collection& col = db_instance->get_collection_by_idx(collection_idx);
         
         std::string_view start_key = (options && options->start_key.data) ? to_string_view(options->start_key) : "";
-        std::optional<std::string_view> end_key;
-        if (options && options->end_key.data && options->end_key.len > 0) {
-            end_key = to_string_view(options->end_key);
-        }
-
         
-        for (auto cursor = col.seek(ctx, start_key, end_key); cursor->is_valid(); cursor->next()) {
-            std::string_view key_sv = cursor->key();
-            DataView value_dv = cursor->value();
+        for (auto record : col.range(ctx, start_key)) {
+            std::string_view key_sv = record->get_key();
+
+            // The old API had an end_key. The new one doesn't directly support it in the same way.
+            // We have to filter here.
+            if (options && options->end_key.data && options->end_key.len > 0) {
+                if (key_sv >= to_string_view(options->end_key)) {
+                    break;
+                }
+            }
+
+            std::string_view value_sv(record->get_value_data(), record->value_len);
             
             size_t key_offset = kv_data->data_buffer.size();
             kv_data->data_buffer.insert(kv_data->data_buffer.end(), key_sv.begin(), key_sv.end());
             
             size_t value_offset = kv_data->data_buffer.size();
-            kv_data->data_buffer.insert(kv_data->data_buffer.end(), value_dv.data, value_dv.data + value_dv.len);
+            kv_data->data_buffer.insert(kv_data->data_buffer.end(), value_sv.begin(), value_sv.end());
 
             
             kv_data->kv_pairs.push_back({
                 {reinterpret_cast<const char*>(key_offset), key_sv.length()},
-                {reinterpret_cast<const char*>(value_offset), value_dv.len}
+                {reinterpret_cast<const char*>(value_offset), value_sv.length()}
             });
         }
 

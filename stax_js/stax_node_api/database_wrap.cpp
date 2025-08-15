@@ -185,7 +185,6 @@ void DatabaseWrap::ExecuteBatch(const Napi::CallbackInfo& info) {
     try {
         Collection& col = db_instance_->get_collection_by_idx(col_idx);
         TxnContext ctx = col.begin_transaction_context(0, false);
-        TransactionBatch batch;
 
         for (uint32_t i = 0; i < num_ops; ++i) {
             if (offset >= length) break;
@@ -205,12 +204,12 @@ void DatabaseWrap::ExecuteBatch(const Napi::CallbackInfo& info) {
                 if (offset + val_len > length) break;
                 std::string_view value(data + offset, val_len);
                 offset += val_len;
-                col.insert(ctx, batch, key, value);
+                col.insert(ctx, key, value);
             } else if (op_type == 2) { 
-                col.remove(ctx, batch, key);
+                col.remove(ctx, key);
             }
         }
-        col.commit(ctx, batch);
+        col.commit(ctx);
     } catch (const std::exception& e) {
         Napi::Error::New(env, e.what()).ThrowAsJavaScriptException();
     }
@@ -699,8 +698,8 @@ Napi::Value TransactionWrap::Get(const Napi::CallbackInfo& info) {
     try {
         Collection& col = db_instance_->get_collection_by_idx(col_idx_);
         auto record = col.get(ctx_, key);
-        if (record.has_value()) {
-            return Napi::Buffer<char>::Copy(env, record->value_ptr, record->value_len);
+        if (record) {
+            return Napi::Buffer<char>::Copy(env, record->get_value_data(), record->value_len);
         }
         return env.Null();
     } catch (const std::exception& e) {
@@ -745,13 +744,12 @@ protected:
             threads.emplace_back([&, t]() {
                 Collection& col = cpp_db->get_collection_by_idx(col_);
                 TxnContext ctx = col.begin_transaction_context(t, false);
-                TransactionBatch batch;
                 size_t start = t * items_per_thread;
                 size_t end = std::min(start + items_per_thread, num_pairs);
                 for (size_t i = start; i < end; ++i) {
-                    col.insert(ctx, batch, kv_data_[i].first, kv_data_[i].second);
+                    col.insert(ctx, kv_data_[i].first, kv_data_[i].second);
                 }
-                col.commit(ctx, batch);
+                col.commit(ctx);
             });
         }
         for (auto& th : threads) th.join();
@@ -799,13 +797,10 @@ protected:
         Collection& col = cpp_db->get_collection_by_idx(col_);
         TxnContext ctx = col.begin_transaction_context(0, true);
 
-        std::vector<std::string_view> key_views;
-        key_views.reserve(keys_to_get_.size());
+        results_.reserve(keys_to_get_.size());
         for(const auto& k : keys_to_get_) {
-            key_views.push_back(k);
+            results_.push_back(col.get(ctx, k));
         }
-
-        col.get_critbit_tree().multi_get_simd(ctx, key_views, results_);
     }
 
     void OnOK() override {
@@ -813,8 +808,8 @@ protected:
         Napi::HandleScope scope(env);
         Napi::Array js_results = Napi::Array::New(env, results_.size());
         for (size_t i = 0; i < results_.size(); ++i) {
-            if (results_[i].has_value()) {
-                js_results[i] = Napi::Buffer<char>::Copy(env, results_[i]->value_ptr, results_[i]->value_len);
+            if (results_[i]) {
+                js_results[i] = Napi::Buffer<char>::Copy(env, results_[i]->get_value_data(), results_[i]->value_len);
             } else {
                 js_results[i] = env.Null();
             }
@@ -831,7 +826,7 @@ private:
     StaxDB db_handle_;
     StaxCollection col_;
     std::vector<std::string> keys_to_get_;
-    std::vector<std::optional<RecordData>> results_;
+    std::vector<StaxRecord*> results_;
 };
 
 void DatabaseWrap::MultiGetAsync(const Napi::CallbackInfo& info) {

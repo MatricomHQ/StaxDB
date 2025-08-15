@@ -55,8 +55,9 @@ class IndexScanOperator : public QueryOperator
 private:
     Collection *col_;
     const TxnContext &ctx_;
-    std::unique_ptr<DBCursor> cursor_;
     std::string key_prefix_;
+    std::vector<StaxRecord*> results_;
+    size_t current_result_idx_;
 
 public:
     IndexScanOperator(Collection *col, const TxnContext &ctx, std::string_view field_name, std::string_view value);
@@ -71,8 +72,10 @@ private:
     const TxnContext &ctx_;
     uint32_t source_id_;
     std::string_view field_name_;
-    std::unique_ptr<DBCursor> cursor_;
     std::string key_prefix_;
+    std::vector<StaxRecord*> results_;
+    size_t current_result_idx_;
+
 
 public:
     ForwardScanOperator(Collection *col, const TxnContext &ctx, uint32_t source_id, std::string_view field_name);

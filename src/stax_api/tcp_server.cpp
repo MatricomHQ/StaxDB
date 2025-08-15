@@ -2,9 +2,7 @@
 #include <string>
 #include <thread> 
 
-#include <asio.hpp>
-#include <asio/ts/buffer.hpp>
-#include <asio/ts/internet.hpp>
+#include <boost/asio.hpp>
 
 
 

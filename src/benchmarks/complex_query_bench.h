@@ -81,14 +81,14 @@ inline uint64_t WideUser::pack_z_order_payload() const {
 }
 
 
-inline void insert_wide_user_local(::Collection& col, const TxnContext& ctx, TransactionBatch& batch, const WideUser& user, const ::PathEngine& pe) {
+inline void insert_wide_user_local(::Collection& col, const TxnContext& ctx, const WideUser& user, const ::PathEngine& pe) {
     std::string doc_key = "doc:wide_user:" + std::to_string(user.user_id);
-    col.insert(ctx, batch, doc_key, user.serialize_doc());
+    col.insert(ctx, doc_key, user.serialize_doc());
     
     uint64_t z_payload = user.pack_z_order_payload();
     std::string idx_key_prefix = pe.create_numeric_sortable_key("idx:wide_user", z_payload);
     std::string full_idx_key = idx_key_prefix + ":" + std::to_string(user.user_id);
-    col.insert(ctx, batch, full_idx_key, "1");
+    col.insert(ctx, full_idx_key, "1");
 }
 
 struct ComplexData {
@@ -227,7 +227,7 @@ inline void run_aggregation_benchmark(std::unique_ptr<::Database>& db, const Com
             for(size_t i = t; i < data.order_line_amounts.size(); i+=num_threads) {
                 std::string key_str = "order_lines:" + std::to_string(i);
                 if (auto res = thread_orders_col.get(ctx, key_str)) {
-                    double amount = std::stod(std::string(res->value_view()));
+                    double amount = std::stod(std::string(res->get_value_data(), res->value_len));
                     thread_local_totals[t][data.order_line_amounts[i].first] += amount;
                 }
             }
@@ -263,11 +263,10 @@ inline void run_delete_scan_benchmark(std::unique_ptr<::Database>& db, const Com
         threads.emplace_back([&, t]() {
             ::Collection& thread_orders_col = db->get_collection_by_idx(orders_col_idx); 
             TxnContext ctx = thread_orders_col.begin_transaction_context(t, false); 
-            TransactionBatch batch; 
             for(size_t i = t; i < num_to_delete; i+=num_threads) {
-                thread_orders_col.remove(ctx, batch, "order_lines:" + std::to_string(i));
+                thread_orders_col.remove(ctx, "order_lines:" + std::to_string(i));
             }
-            thread_orders_col.commit(ctx, batch);
+            thread_orders_col.commit(ctx);
         });
     }
     for(auto& th : threads) th.join();
@@ -333,45 +332,39 @@ inline void run_complex_query_suite() {
         
         ::Collection& users_col = db->get_collection_by_idx(users_col_idx);
         TxnContext users_ctx = users_col.begin_transaction_context(thread_id, false);
-        TransactionBatch users_batch;
-        for(size_t i = thread_id; i < data.user_payloads.size(); i+= NUM_THREADS) users_col.insert(users_ctx, users_batch, "users:" + std::to_string(i), data.user_payloads[i]);
-        users_col.commit(users_ctx, users_batch);
+        for(size_t i = thread_id; i < data.user_payloads.size(); i+= NUM_THREADS) users_col.insert(users_ctx, "users:" + std::to_string(i), data.user_payloads[i]);
+        users_col.commit(users_ctx);
 
         ::Collection& orders_col = db->get_collection_by_idx(orders_col_idx);
         TxnContext orders_ctx = orders_col.begin_transaction_context(thread_id, false);
-        TransactionBatch orders_batch;
-        for(size_t i = thread_id; i < data.order_line_amounts.size(); i+= NUM_THREADS) orders_col.insert(orders_ctx, orders_batch, "order_lines:" + std::to_string(i), std::to_string(data.order_line_amounts[i].second));
-        orders_col.commit(orders_ctx, orders_batch);
+        for(size_t i = thread_id; i < data.order_line_amounts.size(); i+= NUM_THREADS) orders_col.insert(orders_ctx, "order_lines:" + std::to_string(i), std::to_string(data.order_line_amounts[i].second));
+        orders_col.commit(orders_ctx);
 
         ::Collection& premium_col = db->get_collection_by_idx(premium_col_idx);
         TxnContext premium_ctx = premium_col.begin_transaction_context(thread_id, false);
-        TransactionBatch premium_batch;
-        for(size_t i = thread_id; i < data.premium_customer_ids.size(); i+= NUM_THREADS) premium_col.insert(premium_ctx, premium_batch, "sets:premium:" + std::to_string(data.premium_customer_ids[i]), "1");
-        premium_col.commit(premium_ctx, premium_batch);
+        for(size_t i = thread_id; i < data.premium_customer_ids.size(); i+= NUM_THREADS) premium_col.insert(premium_ctx, "sets:premium:" + std::to_string(data.premium_customer_ids[i]), "1");
+        premium_col.commit(premium_ctx);
 
         ::Collection& active_col = db->get_collection_by_idx(active_col_idx);
         TxnContext active_ctx = active_col.begin_transaction_context(thread_id, false);
-        TransactionBatch active_batch;
-        for(size_t i = thread_id; i < data.forum_active_ids.size(); i+= NUM_THREADS) active_col.insert(active_ctx, active_batch, "sets:forum_active:" + std::to_string(data.forum_active_ids[i]), "1");
-        active_col.commit(active_ctx, active_batch);
+        for(size_t i = thread_id; i < data.forum_active_ids.size(); i+= NUM_THREADS) active_col.insert(active_ctx, "sets:forum_active:" + std::to_string(data.forum_active_ids[i]), "1");
+        active_col.commit(active_ctx);
 
         ::Collection& friends_col = db->get_collection_by_idx(friends_col_idx);
         TxnContext friends_ctx = friends_col.begin_transaction_context(thread_id, false);
-        TransactionBatch friends_batch;
         for(size_t i = thread_id; i < data.adj.size(); i+= NUM_THREADS) {
             for(size_t friend_idx : data.adj[i]) {
-                friends_col.insert(friends_ctx, friends_batch, "links/friends/" + std::to_string(i) + "/" + std::to_string(friend_idx), "1");
+                friends_col.insert(friends_ctx, "links/friends/" + std::to_string(i) + "/" + std::to_string(friend_idx), "1");
             }
         }
-        friends_col.commit(friends_ctx, friends_batch);
+        friends_col.commit(friends_ctx);
 
         ::Collection& products_col = db->get_collection_by_idx(products_col_idx);
         TxnContext products_ctx = products_col.begin_transaction_context(thread_id, false);
-        TransactionBatch products_batch;
         for (int i = thread_id; i < TOTAL_RANGE_ITEMS; i += NUM_THREADS) {
-            products_col.insert(products_ctx, products_batch, "products_by_price:" + std::to_string(5000 + (i * 10)), "product_payload_" + std::to_string(i));
+            products_col.insert(products_ctx, "products_by_price:" + std::to_string(5000 + (i * 10)), "product_payload_" + std::to_string(i));
         }
-        products_col.commit(products_ctx, products_batch);
+        products_col.commit(products_ctx);
     };
     for(size_t i = 0; i < NUM_THREADS; ++i) ingest_threads.emplace_back(ingest_work, i);
     for(auto& t : ingest_threads) t.join();

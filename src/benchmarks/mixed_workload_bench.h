@@ -115,7 +115,6 @@ inline void run_db_mixed_workload(std::unique_ptr<::Database>& db, size_t num_th
             ::Collection& col = db->get_collection_by_idx(collection_idx); 
             
             TxnContext ctx = col.begin_transaction_context(i, false); 
-            TransactionBatch batch; 
 
             for (const auto& op : thread_ops[i]) {
                 std::string key = "workload:" + std::to_string(op.key_idx);
@@ -126,7 +125,7 @@ inline void run_db_mixed_workload(std::unique_ptr<::Database>& db, size_t num_th
                     col.get(ctx, key);
                     read_ops++;
                 } else { 
-                    col.insert(ctx, batch, key, op.value_payload_str); 
+                    col.insert(ctx, key, op.value_payload_str);
                     
                     {
                         UniqueSpinLockGuard lock(s_final_key_state_mutex);
@@ -142,7 +141,7 @@ inline void run_db_mixed_workload(std::unique_ptr<::Database>& db, size_t num_th
                     total_write_latency_ns += std::chrono::duration_cast<std::chrono::nanoseconds>(op_end - op_start).count();
                 }
             }
-            col.commit(ctx, batch); 
+            col.commit(ctx);
         });
     }
     for(auto& t : threads) t.join();
@@ -169,9 +168,8 @@ inline void run_db_mixed_workload(std::unique_ptr<::Database>& db, size_t num_th
     {
         ::Collection& col = db->get_collection_by_idx(collection_idx); 
         TxnContext barrier_ctx = col.begin_transaction_context(0, false); 
-        TransactionBatch barrier_batch;
-        col.insert(barrier_ctx, barrier_batch, "~verification_barrier_key~", "sync");
-        col.commit(barrier_ctx, barrier_batch);
+        col.insert(barrier_ctx, "~verification_barrier_key~", "sync");
+        col.commit(barrier_ctx);
     }
 
     
@@ -200,7 +198,7 @@ inline void run_db_mixed_workload(std::unique_ptr<::Database>& db, size_t num_th
                 const std::string& key = it->first;
                 const std::string& expected_value = it->second;
                 auto res = col.get(ctx, key);
-                if (!res || res->value_view() != expected_value) {
+                if (!res || std::string_view(res->get_value_data(), res->value_len) != expected_value) {
                     verification_errors.fetch_add(1, std::memory_order_relaxed);
                     std::lock_guard<std::mutex> lock(failed_verifications_mutex);
                     failed_verifications.push_back({key, expected_value});
@@ -226,9 +224,9 @@ inline void run_db_mixed_workload(std::unique_ptr<::Database>& db, size_t num_th
             const std::string& key = failed_pair.first;
             const std::string& expected_value = failed_pair.second;
             auto res = col.get(re_verify_ctx, key);
-            if (!res || res->value_view() != expected_value) {
+            if (!res || std::string_view(res->get_value_data(), res->value_len) != expected_value) {
                 still_failed_count++;
-                std::cerr << "    [RE-VERIFY FAILED] Key: '" << key << "'. Expected: '" << expected_value << "'. Got: '" << (res ? std::string(res->value_view()) : "NOT_FOUND") << "'" << std::endl;
+                std::cerr << "    [RE-VERIFY FAILED] Key: '" << key << "'. Expected: '" << expected_value << "'. Got: '" << (res ? std::string(res->get_value_data(), res->value_len) : "NOT_FOUND") << "'" << std::endl;
             }
         }
         
@@ -281,7 +279,6 @@ inline void run_mixed_workload_suite() {
         prepop_threads.emplace_back([&, t]() {
             ::Collection& stax_collection = db->get_collection_by_idx(stax_collection_idx);
             TxnContext ctx = stax_collection.begin_transaction_context(t, false); 
-            TransactionBatch batch; 
             
             std::mt19937 thread_local_value_gen(42 + t); 
             for (size_t j = 0; j < batch_size; ++j) { 
@@ -289,14 +286,14 @@ inline void run_mixed_workload_suite() {
                 if (current_idx >= INITIAL_DB_SIZE) break; 
                 std::string key = "workload:" + std::to_string(current_idx);
                 std::string value = ::ThroughputBench::generate_random_value(128, thread_local_value_gen);
-                stax_collection.insert(ctx, batch, key, value);
+                stax_collection.insert(ctx, key, value);
                 
                 {
                     UniqueSpinLockGuard lock(s_final_key_state_mutex);
                     s_final_key_state[key] = value;
                 }
             }
-            stax_collection.commit(ctx, batch);
+            stax_collection.commit(ctx);
         });
     }
     for (auto& t : prepop_threads) t.join();

@@ -70,10 +70,15 @@ private:
     static constexpr uint64_t LEAF_TAG = 1;
     static constexpr uint64_t POINTER_MASK = ~LEAF_TAG;
 
-    static STAX_ALWAYS_INLINE bool is_leaf(uint64_t ptr);
-    static STAX_ALWAYS_INLINE uint64_t get_offset(uint64_t ptr);
-    static STAX_ALWAYS_INLINE uint64_t make_leaf_ptr(uint64_t record_byte_offset);
-    static STAX_ALWAYS_INLINE int get_nibble_at(std::string_view key, uint32_t nibble_idx);
+    static STAX_ALWAYS_INLINE bool is_leaf(uint64_t ptr) { return (ptr & LEAF_TAG) != 0; }
+    static STAX_ALWAYS_INLINE uint64_t get_offset(uint64_t ptr) { return ptr & POINTER_MASK; }
+    static STAX_ALWAYS_INLINE uint64_t make_leaf_ptr(uint64_t record_byte_offset) { return record_byte_offset | LEAF_TAG; }
+    static STAX_ALWAYS_INLINE int get_nibble_at(std::string_view key, uint32_t nibble_idx) {
+        size_t byte_idx = nibble_idx >> 1; // Faster division by 2
+        if (byte_idx >= key.length()) return 0;
+        uint8_t byte = key[byte_idx];
+        return (nibble_idx & 1) == 0 ? (byte >> 4) & 0x0F : byte & 0x0F; // Faster modulo 2
+    }
 
     uint64_t allocate_new_record(ThreadLocalAllocator& local_alloc, const TxnContext &ctx, std::string_view key, std::string_view value, bool is_delete, uint64_t prev_version_offset);
     static int find_first_differing_nibble(std::string_view k1, std::string_view k2);

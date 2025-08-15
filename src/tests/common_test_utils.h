@@ -63,26 +63,26 @@ struct TestUser {
 };
 
 
-inline void insert_user_local(::Collection& col, const TxnContext& ctx, TransactionBatch& batch, const TestUser& user, const ::PathEngine& pe) {
+inline void insert_user_local(::Collection& col, const TxnContext& ctx, const TestUser& user, const ::PathEngine& pe) {
     std::string doc_key = "doc:user:" + std::to_string(user.user_id);
-    col.insert(ctx, batch, doc_key, user.serialize_flex_doc());
+    col.insert(ctx, doc_key, user.serialize_flex_doc());
     
     uint64_t fractal_payload = user.pack_fractal_payload();
     std::string idx_key = pe.create_numeric_sortable_key("idx:user", fractal_payload) + ":" + std::to_string(user.user_id);
-    col.insert(ctx, batch, idx_key, "1");
+    col.insert(ctx, idx_key, "1");
 
     std::string str_idx_key = "idx_str:user:username:" + user.username + ":" + std::to_string(user.user_id);
-    col.insert(ctx, batch, str_idx_key, "1");
+    col.insert(ctx, str_idx_key, "1");
 }
 
 
-inline void delete_user_indexes_local(::Collection& col, const TxnContext& ctx, TransactionBatch& batch, const TestUser& user, const ::PathEngine& pe) {
+inline void delete_user_indexes_local(::Collection& col, const TxnContext& ctx, const TestUser& user, const ::PathEngine& pe) {
     uint64_t fractal_payload = user.pack_fractal_payload();
     std::string idx_key = pe.create_numeric_sortable_key("idx:user", fractal_payload) + ":" + std::to_string(user.user_id);
-    col.remove(ctx, batch, idx_key);
+    col.remove(ctx, idx_key);
     
     std::string str_idx_key = "idx_str:user:username:" + user.username + ":" + std::to_string(user.user_id);
-    col.remove(ctx, batch, str_idx_key);
+    col.remove(ctx, str_idx_key);
 }
 
 } 

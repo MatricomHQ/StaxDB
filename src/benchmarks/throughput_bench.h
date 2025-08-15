@@ -208,13 +208,12 @@ inline void run_throughput_suite(const std::string& suite_name, size_t num_items
         insert_threads.emplace_back([&db, &collection_idx, &total_insert_bytes, thread_idx = i]() { 
             Collection& col = db->get_collection_by_idx(collection_idx); 
             TxnContext ctx = col.begin_transaction_context(thread_idx, false); 
-            TransactionBatch batch; 
 
             for (const auto& item : s_thread_data[thread_idx]) { 
                 total_insert_bytes.fetch_add(item.actual_stored_size_bytes, std::memory_order_relaxed); 
-                col.insert(ctx, batch, item.key, item.value); 
+                col.insert(ctx, item.key, item.value);
             }
-            col.commit(ctx, batch); 
+            col.commit(ctx);
         });
     }
     for (auto& t : insert_threads) if(t.joinable()) t.join();
@@ -230,9 +229,8 @@ inline void run_throughput_suite(const std::string& suite_name, size_t num_items
     {
         Collection& col = db->get_collection_by_idx(collection_idx); 
         TxnContext barrier_ctx = col.begin_transaction_context(0, false); 
-        TransactionBatch barrier_batch;
-        col.insert(barrier_ctx, barrier_batch, "~barrier_key~", "sync");
-        col.commit(barrier_ctx, barrier_batch);
+        col.insert(barrier_ctx, "~barrier_key~", "sync");
+        col.commit(barrier_ctx);
     }
 
     auto start_get = std::chrono::high_resolution_clock::now();
@@ -247,9 +245,9 @@ inline void run_throughput_suite(const std::string& suite_name, size_t num_items
                 auto res = col.get(ctx, item.key); 
                 
                 if (res) {
-                    if (item.key.length() != res->key_len || std::string_view(res->key_ptr, res->key_len) != item.key) {
+                    if (item.key.length() != res->key_len || std::string_view(res->get_key_data(), res->key_len) != item.key) {
                         std::cerr << "!!! ERROR: Key mismatch for queried key: '" << item.key << "'. "
-                                  << "Retrieved key: '" << std::string_view(res->key_ptr, res->key_len) << "'" << std::endl;
+                                  << "Retrieved key: '" << std::string_view(res->get_key_data(), res->key_len) << "'" << std::endl;
                     }
                     total_hits.fetch_add(1, std::memory_order_relaxed);
                     total_get_bytes.fetch_add(item.actual_stored_size_bytes, std::memory_order_relaxed);
@@ -300,12 +298,11 @@ inline void run_throughput_suite(const std::string& suite_name, size_t num_items
         update_threads.emplace_back([&db, &collection_idx, &total_update_bytes, thread_idx = i]() { 
             Collection& col = db->get_collection_by_idx(collection_idx); 
             TxnContext ctx = col.begin_transaction_context(thread_idx, false); 
-            TransactionBatch batch;
             for (const auto& item : s_thread_data[thread_idx]) {
                 total_update_bytes.fetch_add(item.actual_stored_size_bytes, std::memory_order_relaxed);
-                col.insert(ctx, batch, item.key, item.value); 
+                col.insert(ctx, item.key, item.value);
             }
-            col.commit(ctx, batch); 
+            col.commit(ctx);
         });
     }
     for (auto& t : update_threads) if(t.joinable()) t.join();
@@ -324,9 +321,8 @@ inline void run_throughput_suite(const std::string& suite_name, size_t num_items
      {
         Collection& col = db->get_collection_by_idx(collection_idx); 
         TxnContext barrier_ctx = col.begin_transaction_context(0, false); 
-        TransactionBatch barrier_batch;
-        col.insert(barrier_ctx, barrier_batch, "~barrier_key_2~", "sync");
-        col.commit(barrier_ctx, barrier_batch);
+        col.insert(barrier_ctx, "~barrier_key_2~", "sync");
+        col.commit(barrier_ctx);
     }
     for (size_t i = 0; i < num_threads; ++i) {
         verification_threads.emplace_back([&db, &collection_idx, &verification_errors, thread_idx = i]() { 
@@ -334,7 +330,7 @@ inline void run_throughput_suite(const std::string& suite_name, size_t num_items
             TxnContext ctx = col.begin_transaction_context(thread_idx, true); 
             for (const auto& item : s_thread_data[thread_idx]) {
                 auto res = col.get(ctx, item.key);
-                if (!res || res->value_view() != item.value) {
+                if (!res || std::string_view(res->get_value_data(), res->value_len) != item.value) {
                     verification_errors.fetch_add(1, std::memory_order_relaxed);
                 }
             }

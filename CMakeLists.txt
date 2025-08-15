@@ -2,6 +2,8 @@ cmake_minimum_required(VERSION 3.10)
 
 project(StaxDB C CXX)
 
+set(CMAKE_POSITION_INDEPENDENT_CODE ON)
+
 set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_CXX_EXTENSIONS OFF)
@@ -129,8 +131,6 @@ target_link_libraries(stax_benchmark PRIVATE stax_graph stax_common)
 
 # --- Boost.Asio Integration ---
 find_package(Boost REQUIRED COMPONENTS system)
-# Corrected include directory for Asio
-include_directories(third_party/asio/include/boost/)
 
 # Link benchmark runner to Boost
 target_link_libraries(stax_benchmark PRIVATE Boost::system)

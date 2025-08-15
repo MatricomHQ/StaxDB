@@ -130,8 +130,6 @@ public:
 
     void dump_state(std::ostream &os) const;
 
-    static void compact(const std::filesystem::path &db_directory, size_t num_threads, bool flatten = false);
-
     StaxStats::DatabaseStatisticsCollector get_statistics_collector();
 
     void update_last_committed_txn_id(TxnID id);

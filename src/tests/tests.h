@@ -33,7 +33,6 @@
 
 #include "tests/common_test_utils.h" 
 #include "tests/basic_correctness_tests.h"
-#include "tests/compaction_tests.h"
 #include "tests/init_test.h" 
 
 
@@ -54,9 +53,6 @@ void run_all_tests() {
     run_durability_test();
     run_concurrent_init_close_test(); 
    
-    //run_hot_compaction_stress_test(); 
-    //run_compaction_effectiveness_test(); 
-
     std::cout << "\nALL CORRECTNESS TESTS FINISHED SUCCESSFULLY!" << std::endl;
 }
 

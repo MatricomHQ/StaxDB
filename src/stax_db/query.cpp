@@ -5,7 +5,6 @@
 #include "stax_common/roaring.h"
 #include "stax_db/db.h"
 #include "stax_tx/transaction.h"
-#include "stax_tx/db_cursor.hpp"
 
 #include <stdexcept>
 #include <algorithm>
@@ -84,7 +83,6 @@ std::vector<FlexDoc> QueryBuilder::execute()
     Collection &col = db_->get_collection_by_idx(collection_idx_);
 
     TxnContext ctx = col.begin_transaction_context(thread_id_, false);
-    TransactionBatch batch;
 
     roaring_bitmap_t *final_ids = roaring_bitmap_create();
     bool first_filter = true;
@@ -106,9 +104,9 @@ std::vector<FlexDoc> QueryBuilder::execute()
     {
         std::string doc_prefix = "doc:" + ns_ + ":";
 
-        for (auto cursor = col.seek(ctx, doc_prefix); cursor->is_valid() && cursor->key().starts_with(doc_prefix); cursor->next())
+        for (auto record : col.range(ctx, doc_prefix))
         {
-            FlexDoc doc(cursor->value());
+            FlexDoc doc(DataView(record->get_value_data(), record->value_len));
             bool matches_all = true;
             for (const auto &cond : conditions_)
             {
@@ -176,9 +174,9 @@ std::vector<FlexDoc> QueryBuilder::execute()
                                std::get<std::string_view>(cond.value1).data());
             std::string_view key_prefix(key_buffer, len);
 
-            for (auto cursor = col.seek_raw(ctx, key_prefix); cursor->is_valid() && cursor->key().starts_with(key_prefix); cursor->next())
+            for (auto record : col.range(ctx, key_prefix))
             {
-                auto key = cursor->key();
+                auto key = record->get_key();
                 size_t last_colon = key.find_last_of(':');
                 uint64_t id = 0;
                 PathEngine::value_to_uint64(key.substr(last_colon + 1), id);
@@ -221,7 +219,7 @@ std::vector<FlexDoc> QueryBuilder::execute()
 
                 if (auto record_data = col.get(ctx, std::string_view(doc_key_buffer, len)))
                 {
-                    results.emplace_back(DataView(record_data->value_ptr, record_data->value_len));
+                    results.emplace_back(DataView(record_data->get_value_data(), record_data->value_len));
                     retrieved_count++;
                 }
             }
@@ -231,6 +229,6 @@ std::vector<FlexDoc> QueryBuilder::execute()
     }
 
     roaring_bitmap_free(final_ids);
-    col.commit(ctx, batch);
+    col.commit(ctx);
     return results;
 }
