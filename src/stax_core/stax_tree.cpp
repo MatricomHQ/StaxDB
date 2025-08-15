@@ -1,466 +1,181 @@
 #include "stax_core/stax_tree.hpp"
+#include <new>
 
-StaxTree::StaxTree(NodeAllocator &internal_alloc,
-                   CollectionRecordAllocator &record_alloc,
-                   std::atomic<uint64_t> &root_ref)
-    : internal_node_allocator_(internal_alloc),
-      record_allocator_(record_alloc),
-      root_ptr_(root_ref) {}
+StaxTree::StaxTree(StaxAllocator &allocator, std::atomic<uint64_t> &root_ref)
+    : allocator_(allocator), root_ptr_(root_ref) {}
 
-uint32_t StaxTree::find_critical_bit(const char *s1_data, size_t len1, const char *s2_data, size_t len2) const
-{
-    const size_t min_len = (std::min)(len1, len2);
-    size_t diff_byte_idx = 0;
+void StaxTree::insert(ThreadLocalAllocator& local_alloc, const TxnContext &ctx, std::string_view key, std::string_view value, bool is_delete) {
+    std::atomic<uint64_t>* current_ptr_loc = &root_ptr_;
 
-#if defined(__AVX2__) && defined(__BMI__)
-    for (; diff_byte_idx + 32 <= min_len; diff_byte_idx += 32)
-    {
-        __m256i v1 = _mm256_loadu_si256(reinterpret_cast<const __m256i *>(s1_data + diff_byte_idx));
-        __m256i v2 = _mm256_loadu_si256(reinterpret_cast<const __m256i *>(s2_data + diff_byte_idx));
-        int mask = _mm256_movemask_epi8(_mm256_cmpeq_epi8(v1, v2));
-        if (mask != (int)0xFFFFFFFF)
-        {
-            diff_byte_idx += _tzcnt_u32(~mask);
-            goto found_diff_byte;
+    while(true) {
+        uint64_t current_ptr = current_ptr_loc->load(std::memory_order_acquire);
+
+        if (current_ptr == 0) { // Empty slot, try to insert a new leaf
+            uint64_t new_record_offset = allocate_new_record(local_alloc, ctx, key, value, is_delete, 0);
+            uint64_t new_leaf_ptr = make_leaf_ptr(new_record_offset);
+            if (current_ptr_loc->compare_exchange_strong(current_ptr, new_leaf_ptr, std::memory_order_release, std::memory_order_relaxed)) {
+                return; // Success
+            }
+            // Lost the race, another thread inserted. The allocated record is leaked, but handled by the arena.
+            continue; // Retry from the same spot
         }
-    }
-#endif
-#if defined(__SSE2__) || defined(_M_X64) || _M_IX86_FP >= 2
-    for (; diff_byte_idx + 16 <= min_len; diff_byte_idx += 16)
-    {
-        __m128i v1 = _mm_loadu_si128(reinterpret_cast<const __m128i *>(s1_data + diff_byte_idx));
-        __m128i v2 = _mm_loadu_si128(reinterpret_cast<const __m128i *>(s2_data + diff_byte_idx));
-        int mask = _mm_movemask_epi8(_mm_cmpeq_epi8(v1, v2));
-        if (mask != 0xFFFF)
-        {
-#if defined(_MSC_VER)
-            unsigned long index;
-            _BitScanForward(&index, ~mask);
-            diff_byte_idx += index;
-#else
-            diff_byte_idx += __builtin_ctz(~mask);
-#endif
-            goto found_diff_byte;
+
+        if (is_leaf(current_ptr)) {
+            uint64_t existing_record_offset = get_offset(current_ptr);
+            StaxRecord* existing_record = allocator_.get_ptr<StaxRecord>(existing_record_offset);
+            std::string_view existing_key = existing_record->get_key();
+
+            if (existing_key == key) { // Key match, create a new version
+                uint64_t new_record_offset = allocate_new_record(local_alloc, ctx, key, value, is_delete, existing_record_offset);
+                uint64_t new_leaf_ptr = make_leaf_ptr(new_record_offset);
+                 if (current_ptr_loc->compare_exchange_strong(current_ptr, new_leaf_ptr, std::memory_order_release, std::memory_order_relaxed)) {
+                    return; // Success
+                }
+                // Lost the race, retry
+                continue;
+            }
+
+            // Key mismatch, need to split the leaf into an internal node
+            int split_idx = find_first_differing_nibble(key, existing_key);
+
+            uint64_t new_node_offset = local_alloc.allocate(sizeof(InternalNode), alignof(InternalNode));
+            InternalNode* new_node = allocator_.get_ptr<InternalNode>(new_node_offset);
+            new (new_node) InternalNode();
+            new_node->test_nibble_idx = split_idx;
+
+            int nibble_new = get_nibble_at(key, split_idx);
+            int nibble_old = get_nibble_at(existing_key, split_idx);
+
+            uint64_t new_record_offset = allocate_new_record(local_alloc, ctx, key, value, is_delete, 0);
+            new_node->children[nibble_new].store(make_leaf_ptr(new_record_offset), std::memory_order_relaxed);
+            new_node->children[nibble_old].store(current_ptr, std::memory_order_relaxed); // Point to the old leaf
+
+            uint64_t new_internal_node_ptr = get_offset(new_node_offset); // Internal nodes are not tagged
+            if (current_ptr_loc->compare_exchange_strong(current_ptr, new_internal_node_ptr, std::memory_order_release, std::memory_order_relaxed)) {
+                return; // Success
+            }
+            // Lost the race, retry
+            continue;
         }
-    }
-#elif defined(__aarch64__)
-    for (; diff_byte_idx + 16 <= min_len; diff_byte_idx += 16)
-    {
-        uint8x16_t v1 = vld1q_u8(reinterpret_cast<const uint8_t *>(s1_data + diff_byte_idx));
-        uint8x16_t v2 = vld1q_u8(reinterpret_cast<const uint8_t *>(s2_data + diff_byte_idx));
-        uint8x16_t v_xor = veorq_u8(v1, v2);
 
-        uint64x2_t v_xor_64 = vreinterpretq_u64_u8(v_xor);
-        if (vgetq_lane_u64(v_xor_64, 0) != 0)
-        {
-            diff_byte_idx += __builtin_ctzll(vgetq_lane_u64(v_xor_64, 0)) / 8;
-            goto found_diff_byte;
-        }
-        if (vgetq_lane_u64(v_xor_64, 1) != 0)
-        {
-            diff_byte_idx += 8 + (__builtin_ctzll(vgetq_lane_u64(v_xor_64, 1)) / 8);
-            goto found_diff_byte;
-        }
-    }
-#endif
-
-    while (diff_byte_idx < min_len && s1_data[diff_byte_idx] == s2_data[diff_byte_idx])
-    {
-        diff_byte_idx++;
-    }
-
-found_diff_byte:
-    if (diff_byte_idx == min_len && len1 == len2)
-        return (std::numeric_limits<uint32_t>::max)();
-
-    const uint8_t char1 = (diff_byte_idx < len1) ? static_cast<uint8_t>(s1_data[diff_byte_idx]) : 0;
-    const uint8_t char2 = (diff_byte_idx < len2) ? static_cast<uint8_t>(s2_data[diff_byte_idx]) : 0;
-    const uint8_t diff = char1 ^ char2;
-
-    return static_cast<uint32_t>((diff_byte_idx * 8) + (count_leading_zeros(static_cast<uint32_t>(diff)) - ((std::numeric_limits<unsigned int>::digits) - 8)));
-}
-
-std::atomic<uint64_t> *StaxTree::get_link_from_step(const TraversalStep &step)
-{
-    if (step.parent_node_idx == PARENT_IS_ROOT)
-    {
-        return &root_ptr_;
-    }
-
-    std::atomic<uint64_t> &left_child_ptr_ref = internal_node_allocator_.get_left_child_ptr(step.parent_node_idx);
-    if (left_child_ptr_ref.load(std::memory_order_relaxed) == step.child_ptr)
-    {
-        return &left_child_ptr_ref;
-    }
-    else
-    {
-        return &internal_node_allocator_.get_right_child_ptr(step.parent_node_idx);
+        // It's an internal node, traverse down
+        InternalNode* node = allocator_.get_ptr<InternalNode>(current_ptr);
+        int nibble = get_nibble_at(key, node->test_nibble_idx);
+        current_ptr_loc = &node->children[nibble];
     }
 }
 
-void StaxTree::insert(const TxnContext &ctx, std::string_view key, std::string_view value, bool is_delete)
-{
-    thread_local PathBuffer path;
-    const char *key_data = key.data();
-    const size_t key_len = key.length();
-
-retry_operation:
-    path.reset();
-    uint64_t current_parent_idx = PARENT_IS_ROOT;
-    uint64_t current_ptr = root_ptr_.load(std::memory_order_acquire);
-
-    while (current_ptr != NIL_POINTER)
-    {
-        if (!path.push({current_parent_idx, current_ptr}))
-        {
-            path.grow();
-            goto retry_operation;
-        }
-
-        if (current_ptr & POINTER_TAG_BIT)
-        {
-            break;
-        }
-
-        current_parent_idx = current_ptr;
-        bool bit = get_bit(key_data, key_len, internal_node_allocator_.get_bit_index(current_ptr));
-        current_ptr = bit ? internal_node_allocator_.get_right_child_ptr(current_ptr).load(std::memory_order_acquire) : internal_node_allocator_.get_left_child_ptr(current_ptr).load(std::memory_order_acquire);
+std::optional<RecordData> StaxTree::get(const TxnContext &ctx, std::string_view key) const {
+    StaxRecord* record = get_internal(ctx, key);
+    if (!record) {
+        return std::nullopt;
     }
 
-    if (path.size() == 0)
-    {
-        uint32_t new_record_rel_offset;
-        void *record_block_ptr = record_allocator_.reserve_record_space(ctx.thread_id, key_len, value.length(), new_record_rel_offset);
-        record_allocator_.finalize_record_header_and_data(record_block_ptr, key_len, value.length(), is_delete, ctx.txn_id, CollectionRecordAllocator::NIL_RECORD_OFFSET, key_data, value.data());
-        uint64_t new_tagged_ptr = static_cast<uint64_t>(new_record_rel_offset) | POINTER_TAG_BIT;
+    RecordData data;
+    data.key_ptr = record->get_key_data();
+    data.key_len = record->key_len;
+    data.value_ptr = record->get_value_data();
+    data.value_len = record->value_len;
+    data.txn_id = record->txn_id;
+    data.prev_version_offset = record->prev_version_offset;
+    data.is_deleted = record->is_deleted;
 
-        uint64_t expected_root = NIL_POINTER;
-        if (root_ptr_.compare_exchange_strong(expected_root, new_tagged_ptr, std::memory_order_release, std::memory_order_relaxed))
-            return;
-        goto retry_operation;
-    }
-
-    TraversalStep &leaf_step = path.back();
-    uint32_t leaf_record_offset = leaf_step.child_ptr & POINTER_INDEX_MASK;
-
-    const char *existing_key_data;
-    uint32_t existing_key_len;
-    uint32_t existing_value_len;
-    record_allocator_.get_record_key_and_lengths(leaf_record_offset, &existing_key_data, existing_key_len, existing_value_len);
-
-    if (existing_key_data && existing_key_len == key_len && simd_memcmp(existing_key_data, key_data, key_len) == 0)
-    {
-        uint32_t new_record_rel_offset;
-        void *record_block_ptr = record_allocator_.reserve_record_space(ctx.thread_id, key_len, value.length(), new_record_rel_offset);
-        record_allocator_.finalize_record_header_and_data(record_block_ptr, key_len, value.length(), is_delete, ctx.txn_id, leaf_record_offset, key_data, value.data());
-        uint64_t new_tagged_ptr = static_cast<uint64_t>(new_record_rel_offset) | POINTER_TAG_BIT;
-
-        std::atomic<uint64_t> *link_to_modify = get_link_from_step(leaf_step);
-        uint64_t expected_leaf_ptr = leaf_step.child_ptr;
-        if (link_to_modify->compare_exchange_strong(expected_leaf_ptr, new_tagged_ptr, std::memory_order_release, std::memory_order_relaxed))
-            return;
-        goto retry_operation;
-    }
-    else
-    {
-        uint32_t critical_bit = find_critical_bit(key_data, key_len, existing_key_data, existing_key_len);
-
-        auto it = std::lower_bound(path.begin(), path.end() - 1, critical_bit,
-                                   [&](const TraversalStep &step, uint32_t bit)
-                                   {
-                                       if (step.child_ptr & POINTER_TAG_BIT)
-                                       {
-                                           return true;
-                                       }
-                                       return internal_node_allocator_.get_bit_index(step.child_ptr) < bit;
-                                   });
-
-        size_t split_step_index = std::distance(path.begin(), it);
-
-        TraversalStep &split_step = path[split_step_index];
-
-        uint32_t new_record_rel_offset;
-        void *record_block_ptr = record_allocator_.reserve_record_space(ctx.thread_id, key_len, value.length(), new_record_rel_offset);
-        record_allocator_.finalize_record_header_and_data(record_block_ptr, key_len, value.length(), is_delete, ctx.txn_id, CollectionRecordAllocator::NIL_RECORD_OFFSET, key_data, value.data());
-        uint64_t new_tagged_ptr = static_cast<uint64_t>(new_record_rel_offset) | POINTER_TAG_BIT;
-
-        bool existing_key_bit = get_bit(existing_key_data, existing_key_len, critical_bit);
-
-        uint64_t left_child, right_child;
-        if (existing_key_bit)
-        {
-            left_child = new_tagged_ptr;
-            right_child = split_step.child_ptr;
-        }
-        else
-        {
-            left_child = split_step.child_ptr;
-            right_child = new_tagged_ptr;
-        }
-
-        uint64_t new_internal_node_idx = internal_node_allocator_.allocate(ctx.thread_id);
-        internal_node_allocator_.set_bit_index(new_internal_node_idx, critical_bit);
-        internal_node_allocator_.get_left_child_ptr(new_internal_node_idx).store(left_child, std::memory_order_relaxed);
-        internal_node_allocator_.get_right_child_ptr(new_internal_node_idx).store(right_child, std::memory_order_relaxed);
-
-        std::atomic<uint64_t> *link_to_modify = get_link_from_step(split_step);
-        uint64_t expected_link_value = split_step.child_ptr;
-        if (link_to_modify->compare_exchange_strong(expected_link_value, new_internal_node_idx, std::memory_order_release, std::memory_order_relaxed))
-            return;
-
-        internal_node_allocator_.deallocate(new_internal_node_idx);
-        goto retry_operation;
-    }
+    return data;
 }
 
-void StaxTree::insert_batch(const TxnContext &ctx, const CoreKVPair *kv_pairs, size_t num_kvs, TransactionBatch &batch)
-{
-    if (num_kvs == 0)
-        return;
 
-    for (size_t i = 0; i < num_kvs; ++i)
-    {
-        insert(ctx, kv_pairs[i].key, kv_pairs[i].value, false);
-        batch.logical_item_count_delta++;
-        batch.live_record_bytes_delta += (kv_pairs[i].key.length() + kv_pairs[i].value.length() + CollectionRecordAllocator::HEADER_SIZE);
-    }
-}
-
-std::optional<RecordData> StaxTree::get(const TxnContext &ctx, std::string_view key) const
-{
+StaxRecord* StaxTree::get_internal(const TxnContext &ctx, std::string_view key) const {
     uint64_t current_ptr = root_ptr_.load(std::memory_order_relaxed);
-    const char *key_data = key.data();
-    const size_t key_len = key.length();
 
-    for (int i = 0; i < 256; ++i)
-    {
-        if ((current_ptr & POINTER_TAG_BIT) || current_ptr == NIL_POINTER)
-        {
-            break;
-        }
-
-        uint32_t bit_index0 = internal_node_allocator_.get_bit_index(current_ptr);
-        bool bit0 = get_bit(key_data, key_len, bit_index0);
-        uint64_t next_ptr0 = bit0 ? internal_node_allocator_.get_right_child_ptr(current_ptr).load(std::memory_order_relaxed)
-                                  : internal_node_allocator_.get_left_child_ptr(current_ptr).load(std::memory_order_relaxed);
-
-        if ((next_ptr0 & POINTER_TAG_BIT) || next_ptr0 == NIL_POINTER)
-        {
-            current_ptr = next_ptr0;
-            break;
-        }
-
-#if defined(__x86_64__) || defined(__i386__)
-        _mm_prefetch(internal_node_allocator_.get_bit_index_ptr(next_ptr0), _MM_HINT_T0);
-#elif defined(__aarch64__)
-        __builtin_prefetch(internal_node_allocator_.get_bit_index_ptr(next_ptr0), 0, 0);
-#endif
-
-        uint32_t bit_index1 = internal_node_allocator_.get_bit_index(next_ptr0);
-        bool bit1 = get_bit(key_data, key_len, bit_index1);
-        uint64_t next_ptr1 = bit1 ? internal_node_allocator_.get_right_child_ptr(next_ptr0).load(std::memory_order_relaxed)
-                                  : internal_node_allocator_.get_left_child_ptr(next_ptr0).load(std::memory_order_relaxed);
-
-        if ((next_ptr1 & POINTER_TAG_BIT) || next_ptr1 == NIL_POINTER)
-        {
-            current_ptr = next_ptr1;
-            break;
-        }
-
-#if defined(__x86_64__) || defined(__i386__)
-        _mm_prefetch(internal_node_allocator_.get_bit_index_ptr(next_ptr1), _MM_HINT_T0);
-#elif defined(__aarch64__)
-        __builtin_prefetch(internal_node_allocator_.get_bit_index_ptr(next_ptr1), 0, 0);
-#endif
-
-        uint32_t bit_index2 = internal_node_allocator_.get_bit_index(next_ptr1);
-        bool bit2 = get_bit(key_data, key_len, bit_index2);
-        uint64_t next_ptr2 = bit2 ? internal_node_allocator_.get_right_child_ptr(next_ptr1).load(std::memory_order_relaxed)
-                                  : internal_node_allocator_.get_left_child_ptr(next_ptr1).load(std::memory_order_relaxed);
-
-        if ((next_ptr2 & POINTER_TAG_BIT) || next_ptr2 == NIL_POINTER)
-        {
-            current_ptr = next_ptr2;
-            break;
-        }
-
-#if defined(__x86_64__) || defined(__i386__)
-        _mm_prefetch(internal_node_allocator_.get_bit_index_ptr(next_ptr2), _MM_HINT_T0);
-#elif defined(__aarch64__)
-        __builtin_prefetch(internal_node_allocator_.get_bit_index_ptr(next_ptr2), 0, 0);
-#endif
-
-        uint32_t bit_index3 = internal_node_allocator_.get_bit_index(next_ptr2);
-        bool bit3 = get_bit(key_data, key_len, bit_index3);
-        current_ptr = bit3 ? internal_node_allocator_.get_right_child_ptr(next_ptr2).load(std::memory_order_relaxed)
-                           : internal_node_allocator_.get_left_child_ptr(next_ptr2).load(std::memory_order_relaxed);
+    while (current_ptr != 0 && !is_leaf(current_ptr)) {
+        InternalNode* node = allocator_.get_ptr<InternalNode>(current_ptr);
+        int nibble = get_nibble_at(key, node->test_nibble_idx);
+        current_ptr = node->children[nibble].load(std::memory_order_relaxed);
+        #if defined(__x86_64__) || defined(__i386__)
+            if (current_ptr != 0) _mm_prefetch(allocator_.get_ptr<void>(get_offset(current_ptr)), _MM_HINT_T0);
+        #elif defined(__aarch64__)
+            if (current_ptr != 0) __builtin_prefetch(allocator_.get_ptr<void>(get_offset(current_ptr)), 0, 0);
+        #endif
     }
 
-    if (current_ptr == NIL_POINTER)
-        return std::nullopt;
+    if (current_ptr == 0) return nullptr;
 
-    uint32_t record_rel_offset = current_ptr & POINTER_INDEX_MASK;
+    uint64_t record_offset = get_offset(current_ptr);
+    StaxRecord* head_record = allocator_.get_ptr<StaxRecord>(record_offset);
 
-    const char *head_key_ptr;
-    uint32_t head_key_len;
-    uint32_t head_value_len;
-    record_allocator_.get_record_key_and_lengths(record_rel_offset, &head_key_ptr, head_key_len, head_value_len);
+    if (head_record == nullptr || head_record->get_key() != key) return nullptr;
 
-    if (head_key_ptr == nullptr || head_key_len != key_len || simd_memcmp(head_key_ptr, key_data, key_len) != 0)
-    {
-        return std::nullopt;
-    }
-
-    uint32_t current_version_offset = record_rel_offset;
-
-    if (current_version_offset != CollectionRecordAllocator::NIL_RECORD_OFFSET)
-    {
-        void *record_address = record_allocator_.get_record_address(current_version_offset);
-#if defined(__x86_64__) || defined(__i386__)
-        _mm_prefetch(static_cast<const char *>(record_address), _MM_HINT_T0);
-#elif defined(__aarch64__)
-        __builtin_prefetch(record_address, 0, 0);
-#endif
-    }
-
-    while (current_version_offset != CollectionRecordAllocator::NIL_RECORD_OFFSET)
-    {
-        RecordData record = record_allocator_.get_record_data(current_version_offset);
-
-        uint32_t next_version_offset = record.prev_version_rel_offset;
-        if (next_version_offset != CollectionRecordAllocator::NIL_RECORD_OFFSET)
-        {
-            void *next_record_address = record_allocator_.get_record_address(next_version_offset);
-#if defined(__x86_64__) || defined(__i386__)
-            _mm_prefetch(static_cast<const char *>(next_record_address), _MM_HINT_T0);
-#elif defined(__aarch64__)
-            __builtin_prefetch(next_record_address, 0, 0);
-#endif
+    // Traverse the version chain
+    uint64_t current_version_offset = record_offset;
+    while (current_version_offset != 0) {
+        StaxRecord* record = allocator_.get_ptr<StaxRecord>(current_version_offset);
+        if (record->txn_id <= ctx.read_snapshot_id) {
+            if (record->is_deleted) return nullptr; // Tombstone found
+            return record; // Visible version found
         }
-
-        if (record.txn_id <= ctx.read_snapshot_id)
-        {
-            if (record.is_deleted)
-                return std::nullopt;
-            return record;
-        }
-        current_version_offset = next_version_offset;
+        current_version_offset = record->prev_version_offset;
     }
-
-    return std::nullopt;
+    return nullptr; // No visible version found
 }
 
-void StaxTree::multi_get_simd(const TxnContext &ctx, const std::vector<std::string_view> &keys, std::vector<std::optional<RecordData>> &results) const
-{
-    size_t n = keys.size();
-    results.resize(n);
+void StaxTree::remove(ThreadLocalAllocator& local_alloc, const TxnContext &ctx, std::string_view key) {
+    insert(local_alloc, ctx, key, "", true);
+}
+
+uint64_t StaxTree::allocate_new_record(ThreadLocalAllocator& local_alloc, const TxnContext &ctx, std::string_view key, std::string_view value, bool is_delete, uint64_t prev_version_offset) {
+    size_t total_size = sizeof(StaxRecord) + key.length() + value.length();
+    uint64_t offset = local_alloc.allocate(total_size, alignof(StaxRecord));
+
+    StaxRecord* record = allocator_.get_ptr<StaxRecord>(offset);
+    new (record) StaxRecord();
+    record->key_len = key.length();
+    record->value_len = value.length();
+    record->txn_id = ctx.txn_id;
+    record->prev_version_offset = prev_version_offset;
+    record->is_deleted = is_delete;
+    memcpy(record->get_key_data(), key.data(), key.length());
+    if (value.length() > 0) {
+        memcpy(record->get_value_data(), value.data(), value.length());
+    }
+    return offset;
+}
+
+int StaxTree::find_first_differing_nibble(std::string_view k1, std::string_view k2) {
+    const size_t len1 = k1.length();
+    const size_t len2 = k2.length();
+    const size_t min_len = std::min(len1, len2);
     size_t i = 0;
 
-#if defined(__AVX2__)
-    const size_t simd_width = 8;
-    if (n >= simd_width)
-    {
-    }
-#elif defined(__aarch64__)
-    const size_t simd_width = 4;
-    if (n >= simd_width)
-    {
-    }
-#endif
-
-    for (; i < n; ++i)
-    {
-        results[i] = get(ctx, keys[i]);
-    }
-}
-
-void StaxTree::remove(const TxnContext &ctx, std::string_view key)
-{
-    insert(ctx, key, "", true);
-}
-
-void StaxTree::seek(std::string_view start_key, std::stack<uint64_t, std::vector<uint64_t>> &path_stack) const
-{
-    uint64_t current_ptr = root_ptr_.load(std::memory_order_relaxed);
-    if (current_ptr == NIL_POINTER)
-        return;
-    const char *key_data = start_key.data();
-    const size_t key_len = start_key.length();
-
-    while (current_ptr != NIL_POINTER)
-    {
-        path_stack.push(current_ptr);
-        if (current_ptr & POINTER_TAG_BIT)
-            break;
-
-        uint32_t bit_index = internal_node_allocator_.get_bit_index(current_ptr);
-        bool bit = get_bit(key_data, key_len, bit_index);
-        uint64_t next_ptr = bit ? internal_node_allocator_.get_right_child_ptr(current_ptr).load(std::memory_order_relaxed) : internal_node_allocator_.get_left_child_ptr(current_ptr).load(std::memory_order_relaxed);
-
-        current_ptr = next_ptr;
-    }
-}
-
-void StaxTree::find_leaf_nodes_recursive(uint64_t current_ptr, std::string_view prefix, std::vector<uint64_t> &leaf_nodes) const
-{
-    if (current_ptr == NIL_POINTER)
-    {
-        return;
-    }
-
-    if (current_ptr & POINTER_TAG_BIT)
-    {
-        uint32_t record_rel_offset = current_ptr & POINTER_INDEX_MASK;
-        const char *key_ptr;
-        uint32_t key_len, value_len;
-        record_allocator_.get_record_key_and_lengths(record_rel_offset, &key_ptr, key_len, value_len);
-        if (key_ptr && std::string_view(key_ptr, key_len).starts_with(prefix))
-        {
-            leaf_nodes.push_back(current_ptr);
+    // Compare 8 bytes at a time
+    if (min_len >= 8) {
+        const uint64_t* p1 = reinterpret_cast<const uint64_t*>(k1.data());
+        const uint64_t* p2 = reinterpret_cast<const uint64_t*>(k2.data());
+        size_t limit = min_len / 8;
+        for (; i < limit; ++i) {
+            if (p1[i] != p2[i]) {
+                uint64_t xor_chunk = p1[i] ^ p2[i];
+                #if defined(_MSC_VER)
+                    unsigned long differing_bit_idx;
+                    _BitScanForward64(&differing_bit_idx, xor_chunk);
+                #else
+                    long long differing_bit_idx = __builtin_ctzll(xor_chunk);
+                #endif
+                size_t byte_idx = i * 8 + (differing_bit_idx / 8);
+                uint8_t xor_val = k1[byte_idx] ^ k2[byte_idx];
+                return byte_idx * 2 + ((xor_val & 0xF0) == 0);
+            }
         }
-        return;
+        i *= 8;
     }
 
-    uint32_t bit_index = internal_node_allocator_.get_bit_index(current_ptr);
-    size_t byte_idx = bit_index / 8;
-
-    if (byte_idx >= prefix.length())
-    {
-
-        find_leaf_nodes_recursive(internal_node_allocator_.get_left_child_ptr(current_ptr).load(std::memory_order_acquire), prefix, leaf_nodes);
-        find_leaf_nodes_recursive(internal_node_allocator_.get_right_child_ptr(current_ptr).load(std::memory_order_acquire), prefix, leaf_nodes);
-    }
-    else
-    {
-
-        
-        find_leaf_nodes_recursive(internal_node_allocator_.get_left_child_ptr(current_ptr).load(std::memory_order_acquire), prefix, leaf_nodes);
-        find_leaf_nodes_recursive(internal_node_allocator_.get_right_child_ptr(current_ptr).load(std::memory_order_acquire), prefix, leaf_nodes);
-    }
-}
-
-void StaxTree::find_leaf_nodes_in_range(std::string_view prefix, std::vector<uint64_t> &leaf_nodes) const
-{
-    uint64_t current_ptr = root_ptr_.load(std::memory_order_acquire);
-    if (current_ptr == NIL_POINTER)
-    {
-        return;
-    }
-
-    while (current_ptr != NIL_POINTER && !(current_ptr & POINTER_TAG_BIT))
-    {
-        uint32_t bit_index = internal_node_allocator_.get_bit_index(current_ptr);
-        size_t byte_idx = bit_index / 8;
-
-        if (byte_idx >= prefix.length())
-        {
-
-            break;
+    // Compare byte by byte
+    for (; i < min_len; ++i) {
+        if (k1[i] != k2[i]) {
+            uint8_t xor_val = k1[i] ^ k2[i];
+            return i * 2 + ((xor_val & 0xF0) == 0);
         }
-
-        bool bit = get_bit(prefix.data(), prefix.length(), bit_index);
-        current_ptr = bit ? internal_node_allocator_.get_right_child_ptr(current_ptr).load(std::memory_order_acquire) : internal_node_allocator_.get_left_child_ptr(current_ptr).load(std::memory_order_acquire);
     }
 
-    find_leaf_nodes_recursive(current_ptr, prefix, leaf_nodes);
+    // If one key is a prefix of the other
+    return (len1 == len2) ? -1 : min_len * 2;
 }

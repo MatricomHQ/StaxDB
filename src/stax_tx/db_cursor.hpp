@@ -8,7 +8,7 @@
 #include <functional> 
 #include <utility>    
 
-#include "stax_core/value_store.hpp"
+#include "stax_core/stax_tree.hpp"
 #include "stax_common/common_types.hpp"
 #include "stax_tx/transaction.h" 
 #include "stax_db/db.h"            

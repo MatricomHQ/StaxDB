@@ -2,7 +2,6 @@
 #include "stax_db/statistics.h"
 #include "stax_db/db.h"
 #include "stax_core/stax_tree.hpp" 
-#include "stax_core/value_store.hpp" 
 #include "stax_common/os_file_extensions.h" 
 #include <iostream> 
 #include <functional> 

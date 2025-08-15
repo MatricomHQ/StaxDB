@@ -65,6 +65,7 @@ endif()
 
 find_package(Threads REQUIRED)
 target_link_libraries(stax_common PUBLIC Threads::Threads)
+set_target_properties(stax_common PROPERTIES POSITION_INDEPENDENT_CODE ON)
 
 
 # --- Stax Block 1: The Core Engine (Header-Only INTERFACE library) ---
@@ -85,9 +86,9 @@ add_library(stax_db STATIC
     src/stax_db/query.cpp
     src/stax_core/stax_tree.cpp
     src/stax_db/statistics.cpp
-    src/stax_core/node_allocator.cpp
 )
 target_link_libraries(stax_db PUBLIC stax_tx stax_common)
+set_target_properties(stax_db PROPERTIES POSITION_INDEPENDENT_CODE ON)
 
 
 # --- Stax Block 4: The Graph Engine ---
@@ -95,6 +96,7 @@ add_library(stax_graph STATIC
     src/stax_graph/graph_engine.cpp
 )
 target_link_libraries(stax_graph PUBLIC stax_db)
+set_target_properties(stax_graph PROPERTIES POSITION_INDEPENDENT_CODE ON)
 
 
 # --- Stax Block 5: The C FFI API Layer ---
