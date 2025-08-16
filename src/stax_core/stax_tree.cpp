@@ -179,3 +179,78 @@ int StaxTree::find_first_differing_nibble(std::string_view k1, std::string_view 
     // If one key is a prefix of the other
     return (len1 == len2) ? -1 : min_len * 2;
 }
+
+void StaxTree::seek(std::string_view start_key, std::stack<std::pair<uint64_t, int>, std::vector<std::pair<uint64_t, int>>> &path) const {
+    uint64_t root_node_ptr = root_ptr_.load(std::memory_order_relaxed);
+    if (root_node_ptr == 0) return;
+
+    // Path stack stores pairs of (node_ptr, next_child_idx_to_check)
+    path.push({root_node_ptr, 0});
+
+    while (!path.empty()) {
+        auto& [current_ptr, child_idx] = path.top();
+
+        if (is_leaf(current_ptr)) {
+            StaxRecord* record = allocator_.get_ptr<StaxRecord>(get_offset(current_ptr));
+            if (record->get_key() >= start_key) {
+                // Found a valid leaf. The path is now pointing to it.
+                return;
+            }
+
+            // Leaf key is smaller than start_key, so this leaf is not a candidate.
+            // Backtrack to find the next leaf.
+            path.pop(); // Pop the invalid leaf
+            if (path.empty()) {
+                return; // No more nodes to check
+            }
+            continue;
+        }
+
+        InternalNode* node = allocator_.get_ptr<InternalNode>(current_ptr);
+
+        // Determine which child to start searching from.
+        // If we are revisiting this node (child_idx > 0), we continue from where we left off.
+        // Otherwise, we calculate the nibble from the start_key.
+        int start_nibble = (child_idx == 0) ? get_nibble_at(start_key, node->test_nibble_idx) : child_idx;
+
+        bool found_next_path = false;
+        for (int i = start_nibble; i < 16; ++i) {
+            uint64_t child_ptr = node->children[i].load(std::memory_order_relaxed);
+            if (child_ptr != 0) {
+                // Found a potential path. Update parent's next_child_idx and push the child.
+                path.top().second = i + 1; // Next time we visit parent, start from the next sibling
+                path.push({child_ptr, 0}); // Start checking child from its first nibble
+
+                // Now, dive to the leftmost leaf of this new subtree
+                while (true) {
+                    uint64_t dive_ptr = path.top().first;
+                    if (is_leaf(dive_ptr)) {
+                        break; // Reached a leaf, break dive
+                    }
+                    InternalNode* dive_node = allocator_.get_ptr<InternalNode>(dive_ptr);
+                    bool found_dive_child = false;
+                    for (int j = 0; j < 16; ++j) {
+                        uint64_t next_dive_ptr = dive_node->children[j].load(std::memory_order_relaxed);
+                        if (next_dive_ptr != 0) {
+                            path.push({next_dive_ptr, j + 1});
+                            found_dive_child = true;
+                            break;
+                        }
+                    }
+                    if (!found_dive_child) {
+                        // This internal node has no children, which is inconsistent.
+                        // But to be safe, we stop diving.
+                        break;
+                    }
+                }
+                found_next_path = true;
+                break; // Break from the for loop
+            }
+        }
+
+        if (!found_next_path) {
+            // No more children to explore in this node, backtrack.
+            path.pop();
+        }
+    }
+}

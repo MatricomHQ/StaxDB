@@ -59,45 +59,91 @@ CollectionEntry &DbGeneration::get_collection_entry_ref(uint32_t idx) const
 }
 
 // =================================================================================================
-// --- CURSOR IMPLEMENTATION (Temporarily Disabled) ---
-// The cursor implementation was tightly coupled to the old crit-bit tree structure.
-// It needs to be re-written to support the new nibble-based tree.
-// For now, all cursor functions will throw a runtime_error.
+// --- CURSOR IMPLEMENTATION ---
 // =================================================================================================
 
-MergedCursorImpl::MergedCursorImpl(Database *db, const TxnContext &ctx, uint32_t collection_idx, std::string_view start_key_view, std::optional<std::string_view> end_key)
-    : db_(db), ctx_(ctx)
-{
-    throw std::runtime_error("Cursor functionality is temporarily disabled pending rewrite for new tree structure.");
+MergedCursorImpl::MergedCursorImpl(Database *db, const TxnContext &ctx, uint32_t collection_idx, std::string_view start_key, std::optional<std::string_view> end_key)
+    : db_(db), ctx_(ctx), has_end_key_(end_key.has_value()) {
+    if (has_end_key_) {
+        end_key_buffer_ = *end_key;
+        end_key_view_ = end_key_buffer_;
+    }
+
+    const auto& generations = db->get_generations();
+    for (size_t i = 0; i < generations.size(); ++i) {
+        const auto& gen = generations[i];
+        if (collection_idx < gen->owned_collections.size() && gen->owned_collections[collection_idx]) {
+            DBCursor cursor(db, ctx, &gen->owned_collections[collection_idx]->get_critbit_tree(), start_key, end_key, i > 0);
+            if (cursor.is_valid()) {
+                pq_.push({std::move(cursor), i});
+            }
+        }
+    }
+    advance();
 }
 
-void MergedCursorImpl::advance()
-{
-    throw std::runtime_error("Cursor functionality is temporarily disabled.");
+void MergedCursorImpl::advance() {
+    if (pq_.empty()) {
+        is_valid_ = false;
+        return;
+    }
+
+    // Process top element
+    MergeCursorState top = std::move(const_cast<MergeCursorState&>(pq_.top()));
+    pq_.pop();
+
+    last_key_view_ = top.cursor.key();
+    last_key_buffer_ = std::string(last_key_view_);
+    last_key_view_ = last_key_buffer_;
+
+    current_record_data_ = top.cursor.current_record_data_;
+    is_valid_ = !current_record_data_.is_deleted;
+
+    // Advance the cursor that was just used
+    top.cursor.next();
+    if (top.cursor.is_valid()) {
+        pq_.push(std::move(top));
+    }
+
+    // Remove duplicates
+    while (!pq_.empty() && pq_.top().cursor.key() == last_key_view_) {
+        MergeCursorState next_top = std::move(const_cast<MergeCursorState&>(pq_.top()));
+        pq_.pop();
+        if (next_top.cursor.is_valid()) {
+            next_top.cursor.next();
+            if (next_top.cursor.is_valid()) {
+                 pq_.push(std::move(next_top));
+            }
+        }
+    }
+
+    if (!is_valid_ && !pq_.empty()) {
+        advance();
+    }
 }
 
-DBCursor::DBCursor() : impl_(nullptr), ctx_(inert_context) {
-    // throw std::runtime_error("Cursor functionality is temporarily disabled.");
+DBCursor::DBCursor(Database* db, const TxnContext& ctx, uint32_t collection_idx, std::string_view start_key, std::optional<std::string_view> end_key)
+    : impl_(std::make_unique<MergedCursorImpl>(db, ctx, collection_idx, start_key, end_key)), ctx_(ctx) {}
+
+DBCursor::DBCursor(Database* db, const TxnContext& ctx, StaxTree* tree, std::optional<std::string_view> end_key, bool raw_mode)
+    : db_(db), ctx_(ctx), tree_(tree), raw_mode_(raw_mode) {
+    if (end_key) {
+        has_end_key_ = true;
+        end_key_buffer_ = *end_key;
+        end_key_view_ = end_key_buffer_;
+    }
+    tree->seek("", path_stack_);
+    if (!path_stack_.empty()) {
+        validate_current_leaf();
+    } else {
+        is_valid_ = false;
+    }
 }
 
-DBCursor::DBCursor(Database *db, const TxnContext &ctx, uint32_t collection_idx, std::string_view start_key, std::optional<std::string_view> end_key)
-    : impl_(std::make_unique<MergedCursorImpl>(db, ctx, collection_idx, start_key, end_key)), ctx_(ctx) {
-    throw std::runtime_error("Cursor functionality is temporarily disabled.");
-}
 
-DBCursor::DBCursor(Database *db, const TxnContext &ctx, StaxTree *tree, std::optional<std::string_view> end_key, bool raw_mode)
-    : db_(db), ctx_(ctx), tree_(tree), is_valid_(false), raw_mode_(raw_mode)
-{
-    throw std::runtime_error("Cursor functionality is temporarily disabled.");
-}
-
-DBCursor::DBCursor(Database *db, const TxnContext &ctx, StaxTree *tree, std::string_view start_key, std::optional<std::string_view> end_key, bool raw_mode)
-    : db_(db), ctx_(ctx), tree_(tree), is_valid_(false), raw_mode_(raw_mode)
-{
-    throw std::runtime_error("Cursor functionality is temporarily disabled.");
-}
-
-DBCursor::~DBCursor() = default;
+// =================================================================================================
+// --- End of Cursor Code ---
+// =================================================================================================
 
 bool DBCursor::is_valid() const
 {
@@ -115,12 +161,7 @@ DataView DBCursor::value() const
 {
     if (impl_) return impl_->is_valid_ ? DataView(impl_->current_record_data_.value_ptr, impl_->current_record_data_.value_len) : DataView{};
     if (!is_valid_) return {};
-    return DataView(current_record_data_.value_ptr, current_record_data_.value_len);
-}
-
-void DBCursor::advance_to_next_physical_leaf()
-{
-    throw std::runtime_error("Cursor functionality is temporarily disabled.");
+    return DataView(reinterpret_cast<const unsigned char*>(current_record_data_.value_ptr), current_record_data_.value_len);
 }
 
 void DBCursor::next()
@@ -129,18 +170,8 @@ void DBCursor::next()
         impl_->advance();
         return;
     }
-    throw std::runtime_error("Cursor functionality is temporarily disabled.");
+    advance_to_next_physical_leaf();
 }
-
-void DBCursor::validate_current_leaf()
-{
-    throw std::runtime_error("Cursor functionality is temporarily disabled.");
-}
-
-
-// =================================================================================================
-// --- End of Disabled Cursor Code ---
-// =================================================================================================
 
 thread_local HybridTimestampGenerator::ThreadTxnIDGenerator HybridTimestampGenerator::tls_generator_;
 

@@ -24,8 +24,8 @@ namespace {
 
 class DBCursor {
 public:
-    DBCursor();
-    ~DBCursor();
+    DBCursor() : ctx_(inert_context) {}
+    ~DBCursor() = default;
     
     DBCursor(DBCursor&& other) noexcept;
     DBCursor& operator=(DBCursor&& other) noexcept;
@@ -60,7 +60,7 @@ private:
     bool is_valid_ = false;
     bool raw_mode_ = false;
 
-    std::stack<uint64_t, std::vector<uint64_t>> path_stack_;
+    std::stack<std::pair<uint64_t, int>, std::vector<std::pair<uint64_t, int>>> path_stack_;
     
     RecordData current_record_data_;
 
@@ -71,6 +71,114 @@ private:
     std::string_view end_key_view_;
     bool has_end_key_ = false;
 };
+
+inline DBCursor::DBCursor(Database* db, const TxnContext& ctx, StaxTree* tree, std::string_view start_key, std::optional<std::string_view> end_key, bool raw_mode)
+    : db_(db), ctx_(ctx), tree_(tree), raw_mode_(raw_mode) {
+    if (end_key) {
+        has_end_key_ = true;
+        end_key_buffer_ = *end_key;
+        end_key_view_ = end_key_buffer_;
+    }
+    tree->seek(start_key, path_stack_);
+    if (!path_stack_.empty()) {
+        validate_current_leaf();
+    } else {
+        is_valid_ = false;
+    }
+}
+
+inline void DBCursor::validate_current_leaf() {
+    is_valid_ = false;
+    if (path_stack_.empty()) return;
+
+    uint64_t leaf_ptr = path_stack_.top().first;
+    StaxRecord* record = tree_->get_allocator().get_ptr<StaxRecord>(StaxTree::get_offset(leaf_ptr));
+
+    current_key_ptr_ = record->get_key_data();
+    current_key_len_ = record->key_len;
+    if (has_end_key_ && key() >= end_key_view_) {
+        is_valid_ = false;
+        return;
+    }
+
+    while (true) {
+        // Version visibility check
+        if (raw_mode_ || record->txn_id <= ctx_.read_snapshot_id) {
+            if (record->is_deleted) {
+                // Tombstone found, advance to the next physical leaf
+                advance_to_next_physical_leaf();
+                return;
+            }
+
+            current_record_data_.key_ptr = current_key_ptr_;
+            current_record_data_.key_len = current_key_len_;
+            current_record_data_.value_ptr = record->get_value_data();
+            current_record_data_.value_len = record->value_len;
+            current_record_data_.txn_id = record->txn_id;
+            current_record_data_.prev_version_offset = record->prev_version_offset;
+            current_record_data_.is_deleted = record->is_deleted;
+            is_valid_ = true;
+            return;
+        }
+
+        if (record->prev_version_offset == 0) {
+            // No older version, advance to next leaf
+            advance_to_next_physical_leaf();
+            return;
+        }
+        record = tree_->get_allocator().get_ptr<StaxRecord>(record->prev_version_offset);
+    }
+}
+
+inline void DBCursor::advance_to_next_physical_leaf() {
+    if (path_stack_.empty()) {
+        is_valid_ = false;
+        return;
+    }
+
+    // Backtrack up the stack to find the next sibling
+    path_stack_.pop();
+
+    while (!path_stack_.empty()) {
+        auto& [parent_ptr, nibble_idx] = path_stack_.top();
+        InternalNode* parent_node = tree_->get_allocator().get_ptr<InternalNode>(StaxTree::get_offset(parent_ptr));
+
+        for (int i = nibble_idx; i < 16; ++i) {
+            uint64_t child_ptr = parent_node->children[i].load(std::memory_order_relaxed);
+            if (child_ptr != 0) {
+                path_stack_.top().second = i + 1;
+                path_stack_.push({child_ptr, 0});
+                // Found the next branch, now dive down to the first leaf
+                while (true) {
+                    uint64_t dive_ptr = path_stack_.top().first;
+                    if (StaxTree::is_leaf(dive_ptr)) {
+                        validate_current_leaf();
+                        return;
+                    }
+                    InternalNode* dive_node = tree_->get_allocator().get_ptr<InternalNode>(StaxTree::get_offset(dive_ptr));
+                    bool found_child = false;
+                    for (int j = 0; j < 16; ++j) {
+                        uint64_t next_dive_ptr = dive_node->children[j].load(std::memory_order_relaxed);
+                        if (next_dive_ptr != 0) {
+                            path_stack_.top().second = j + 1;
+                            path_stack_.push({next_dive_ptr, 0});
+                            found_child = true;
+                            break;
+                        }
+                    }
+                    if (!found_child) { // Should not happen in a well-formed tree
+                        is_valid_ = false;
+                        return;
+                    }
+                }
+            }
+        }
+        path_stack_.pop();
+    }
+    is_valid_ = false; // No more leaves
+}
+
+
 
 
 inline DBCursor::DBCursor(DBCursor&& other) noexcept

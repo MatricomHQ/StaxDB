@@ -58,6 +58,7 @@ private:
 
 public:
     StaxTree(StaxAllocator &allocator, std::atomic<uint64_t> &root_ref);
+    StaxAllocator& get_allocator() const { return allocator_; }
 
     void insert(ThreadLocalAllocator& local_alloc, const TxnContext &ctx, std::string_view key, std::string_view value, bool is_delete = false);
     std::optional<RecordData> get(const TxnContext &ctx, std::string_view key) const;
@@ -67,9 +68,7 @@ public:
     void insert_batch(const TxnContext &ctx, const CoreKVPair *kv_pairs, size_t num_kvs, TransactionBatch &batch) {
         throw std::runtime_error("insert_batch not implemented in new tree");
     }
-    void seek(std::string_view start_key, std::stack<uint64_t, std::vector<uint64_t>> &path_stack) const {
-        throw std::runtime_error("seek not implemented in new tree");
-    }
+    void seek(std::string_view start_key, std::stack<std::pair<uint64_t, int>, std::vector<std::pair<uint64_t, int>>> &path) const;
     void find_leaf_nodes_in_range(std::string_view prefix, std::vector<uint64_t> &leaf_nodes) const {
         throw std::runtime_error("find_leaf_nodes_in_range not implemented in new tree");
     }
@@ -80,14 +79,15 @@ public:
         }
     }
 
+public:
+    static STAX_ALWAYS_INLINE bool is_leaf(uint64_t ptr) { return (ptr & LEAF_TAG) != 0; }
+    static STAX_ALWAYS_INLINE uint64_t get_offset(uint64_t ptr) { return ptr & POINTER_MASK; }
 private:
     StaxRecord* get_internal(const TxnContext &ctx, std::string_view key) const;
 
     static constexpr uint64_t LEAF_TAG = 1;
     static constexpr uint64_t POINTER_MASK = ~LEAF_TAG;
 
-    static STAX_ALWAYS_INLINE bool is_leaf(uint64_t ptr) { return (ptr & LEAF_TAG) != 0; }
-    static STAX_ALWAYS_INLINE uint64_t get_offset(uint64_t ptr) { return ptr & POINTER_MASK; }
     static STAX_ALWAYS_INLINE uint64_t make_leaf_ptr(uint64_t record_byte_offset) { return record_byte_offset | LEAF_TAG; }
 
     static STAX_ALWAYS_INLINE int get_nibble_at(std::string_view key, uint32_t nibble_idx) {

@@ -44,16 +44,16 @@ static_assert(std::is_standard_layout<FlexDocHeader>::value, "FlexDocHeader must
 
 struct DataView
 {
-    const char *data;
+    const unsigned char *data;
     size_t len;
 
     DataView() : data(nullptr), len(0) {}
-
-    DataView(const char *ptr, size_t l) : data(ptr), len(l) {}
+    DataView(const char *ptr, size_t l) : data(reinterpret_cast<const unsigned char*>(ptr)), len(l) {}
+    DataView(const unsigned char *ptr, size_t l) : data(ptr), len(l) {}
 
     operator std::string_view() const
     {
-        return std::string_view(data, len);
+        return std::string_view(reinterpret_cast<const char*>(data), len);
     }
 };
 

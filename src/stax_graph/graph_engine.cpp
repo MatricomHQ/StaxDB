@@ -244,7 +244,7 @@ std::optional<std::string_view> GraphReader::get_property_for_object_string(uint
     auto result = get_property_for_object_direct(obj_id, field_name);
     if (result && result->len > 1 && result->data[0] == StaxValueType::String)
     {
-        return std::string_view(result->data + 1, result->len - 1);
+        return std::string_view(reinterpret_cast<const char*>(result->data) + 1, result->len - 1);
     }
     return std::nullopt;
 }
@@ -254,7 +254,7 @@ std::optional<uint64_t> GraphReader::get_property_for_object_numeric(uint32_t ob
     auto result = get_property_for_object_direct(obj_id, field_name);
     if (result && result->len == 1 + GraphTransaction::BINARY_U64_SIZE && (result->data[0] == StaxValueType::Numeric || result->data[0] == StaxValueType::Geo))
     {
-        return from_binary_key_u64(std::string_view(result->data + 1, GraphTransaction::BINARY_U64_SIZE));
+        return from_binary_key_u64(std::string_view(reinterpret_cast<const char*>(result->data) + 1, GraphTransaction::BINARY_U64_SIZE));
     }
     return std::nullopt;
 }
