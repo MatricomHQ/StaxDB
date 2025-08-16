@@ -13,7 +13,6 @@
 
 #include "stax_common/os_platform_tools.h"
 #include "stax_db/arena_structs.h"
-#include "stax_core/stax_tree.hpp"
 #include "stax_core/stax_new_tree.hpp"
 #include "stax_common/common_types.hpp"
 #include "stax_common/spin_locks.h"
@@ -70,8 +69,8 @@ class Collection
 {
 public:
     uint32_t get_id() const { return collection_idx_; }
-    StaxTree &get_critbit_tree() { return *critbit_tree_; }
-    const StaxTree &get_critbit_tree() const { return *critbit_tree_; }
+    StaxTree16 &get_tree() { return *tree_; }
+    const StaxTree16 &get_tree() const { return *tree_; }
 
     Collection(Database *parent_db, DbGeneration *owning_generation, uint32_t collection_idx);
 
@@ -99,7 +98,7 @@ private:
     DbGeneration *owning_generation_;
     uint32_t collection_idx_;
 
-    std::unique_ptr<StaxTree> critbit_tree_;
+    std::unique_ptr<StaxTree16> tree_;
 };
 
 enum class DurabilityLevel

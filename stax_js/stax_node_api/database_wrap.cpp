@@ -805,7 +805,7 @@ protected:
             key_views.push_back(k);
         }
 
-        col.get_critbit_tree().multi_get_simd(ctx, key_views, results_);
+        col.get_tree().multi_get_simd(ctx, key_views, results_);
     }
 
     void OnOK() override {

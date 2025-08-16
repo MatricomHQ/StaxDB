@@ -8,13 +8,12 @@
 #include <functional> 
 #include <utility>    
 
-#include "stax_core/stax_tree.hpp"
+#include "stax_core/stax_new_tree.hpp"
 #include "stax_common/common_types.hpp"
-#include "stax_tx/transaction.h" 
-#include "stax_db/db.h"            
+#include "stax_tx/transaction.h"
+#include "stax_db/db.h"
 
-
-class StaxTree;
+class StaxTree16;
 class MergedCursorImpl;
 
 namespace { 
@@ -37,101 +36,72 @@ public:
     std::string_view key() const;
     DataView value() const;
     void next();
+    StaxRecord* get_current_record() const { return current_record_; }
     
-    
-    DBCursor(Database* db, const TxnContext& ctx, uint32_t collection_idx, std::string_view start_key, std::optional<std::string_view> end_key);
-    DBCursor(Database* db, const TxnContext& ctx, StaxTree* tree, std::optional<std::string_view> end_key, bool raw_mode = false); 
-    DBCursor(Database* db, const TxnContext& ctx, StaxTree* tree, std::string_view start_key, std::optional<std::string_view> end_key, bool raw_mode = false);
-
+    DBCursor(StaxTree16* tree, const TxnContext& ctx, std::string_view start_key, std::optional<std::string_view> end_key);
 
 private:
     friend class Collection;
-    friend class MergedCursorImpl;
     friend class Database; 
 
-    void validate_current_leaf();
-    void advance_to_next_physical_leaf();
+    void find_initial_leaf();
+    void advance_to_next_valid();
+    bool is_visible(StaxRecord* record);
 
-    std::unique_ptr<MergedCursorImpl> impl_;
-    
-    Database* db_ = nullptr;
+    StaxTree16* tree_ = nullptr;
     const TxnContext& ctx_;
-    StaxTree* tree_ = nullptr; 
     bool is_valid_ = false;
-    bool raw_mode_ = false;
 
-    std::stack<uint64_t, std::vector<uint64_t>> path_stack_;
+    std::stack<uint64_t> path_stack_;
+    StaxRecord* current_record_ = nullptr;
     
-    RecordData current_record_data_;
+    std::string start_key_buffer_;
+    std::string_view start_key_view_;
 
-    const char* current_key_ptr_ = nullptr;
-    uint16_t current_key_len_ = 0;
-    
     std::string end_key_buffer_;
     std::string_view end_key_view_;
     bool has_end_key_ = false;
 };
 
-
 inline DBCursor::DBCursor(DBCursor&& other) noexcept
-    : impl_(std::move(other.impl_)),
-      db_(other.db_),
-      ctx_(other.ctx_), 
-      tree_(other.tree_),
+    : tree_(other.tree_),
+      ctx_(other.ctx_),
       is_valid_(other.is_valid_),
-      raw_mode_(other.raw_mode_),
       path_stack_(std::move(other.path_stack_)),
-      current_record_data_(other.current_record_data_),
-      current_key_ptr_(other.current_key_ptr_),
-      current_key_len_(other.current_key_len_),
+      current_record_(other.current_record_),
+      start_key_buffer_(std::move(other.start_key_buffer_)),
       end_key_buffer_(std::move(other.end_key_buffer_)),
-      
       has_end_key_(other.has_end_key_)
 {
-    
-    
+    start_key_view_ = start_key_buffer_;
     if (has_end_key_) {
         end_key_view_ = end_key_buffer_;
     }
-
     
     other.is_valid_ = false;
     other.tree_ = nullptr;
-    other.db_ = nullptr;
+    other.current_record_ = nullptr;
 }
 
 inline DBCursor& DBCursor::operator=(DBCursor&& other) noexcept {
     if (this != &other) {
-        
-        impl_.reset(); 
-
-        impl_ = std::move(other.impl_);
-        db_ = other.db_;
-        
-        
-        
         tree_ = other.tree_;
+        // ctx_ cannot be moved as it's a reference
         is_valid_ = other.is_valid_;
-        raw_mode_ = other.raw_mode_;
         path_stack_ = std::move(other.path_stack_);
-        current_record_data_ = other.current_record_data_;
-        current_key_ptr_ = other.current_key_ptr_;
-        current_key_len_ = other.current_key_len_;
+        current_record_ = other.current_record_;
+        start_key_buffer_ = std::move(other.start_key_buffer_);
         end_key_buffer_ = std::move(other.end_key_buffer_);
         has_end_key_ = other.has_end_key_;
-        
-        
-        
+
+        start_key_view_ = start_key_buffer_;
         if (has_end_key_) {
             end_key_view_ = end_key_buffer_;
-        } else {
-            end_key_view_ = {};
         }
-
         
         other.is_valid_ = false;
         other.tree_ = nullptr;
-        other.db_ = nullptr;
+        other.current_record_ = nullptr;
     }
     return *this;
 }

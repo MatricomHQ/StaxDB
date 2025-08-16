@@ -15,7 +15,6 @@
 
 
 #include "stax_db/db.h"
-#include "stax_core/stax_tree.hpp" 
 #include "stax_db/path_engine.h"
 #include "stax_common/constants.h" 
 #include "benchmarks/throughput_bench.h" 
@@ -52,7 +51,7 @@ inline void run_tree_stress_test() {
     auto db = Database::create_new(db_dir, num_threads);
     uint32_t col_idx = db->get_collection("tree_stress_test");
     Collection& col = db->get_collection_by_idx(col_idx);
-    StaxTree& tree = col.get_critbit_tree();
+    StaxTree16& tree = col.get_tree();
     
     
     std::cout << "Generating test data..." << std::endl;

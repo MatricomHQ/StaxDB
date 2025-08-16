@@ -84,7 +84,6 @@ target_link_libraries(stax_tx INTERFACE stax_core)
 add_library(stax_db STATIC
     src/stax_db/db.cpp
     src/stax_db/query.cpp
-    src/stax_core/stax_tree.cpp
     src/stax_db/statistics.cpp
 )
 target_link_libraries(stax_db PUBLIC stax_tx stax_common)

@@ -34,7 +34,7 @@
 
 
 #include "stax_db/db.h"          
-#include "stax_core/stax_tree.hpp"
+// #include "stax_core/stax_tree.hpp"
 
 #include "stax_common/constants.h"
 #include "benchmarks/throughput_bench.h" 

@@ -798,7 +798,8 @@ void GraphTransaction::clear_object_properties(uint32_t obj_id) {
 
 void GraphTransaction::multi_insert_low_level_on_collection(::Collection* target_col, const TxnContext& ctx, TransactionBatch& batch, const CoreKVPair* kv_pairs, size_t num_kvs, uint64_t total_live_bytes_to_add) {
     if (!target_col || num_kvs == 0) return;
-    target_col->get_critbit_tree().insert_batch(ctx, kv_pairs, num_kvs, batch);
+    ThreadLocalAllocator& local_alloc = db_->get_thread_local_allocator(ctx.thread_id);
+    target_col->get_tree().insert_batch(local_alloc, ctx, kv_pairs, num_kvs, batch);
 }
 
 void GraphTransaction::flush_pending_writes() {

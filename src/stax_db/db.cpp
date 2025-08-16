@@ -59,88 +59,113 @@ CollectionEntry &DbGeneration::get_collection_entry_ref(uint32_t idx) const
 }
 
 // =================================================================================================
-// --- CURSOR IMPLEMENTATION (Temporarily Disabled) ---
-// The cursor implementation was tightly coupled to the old crit-bit tree structure.
-// It needs to be re-written to support the new nibble-based tree.
-// For now, all cursor functions will throw a runtime_error.
+// --- New Cursor Implementation ---
 // =================================================================================================
-
-MergedCursorImpl::MergedCursorImpl(Database *db, const TxnContext &ctx, uint32_t collection_idx, std::string_view start_key_view, std::optional<std::string_view> end_key)
-    : db_(db), ctx_(ctx)
-{
-    throw std::runtime_error("Cursor functionality is temporarily disabled pending rewrite for new tree structure.");
-}
-
-void MergedCursorImpl::advance()
-{
-    throw std::runtime_error("Cursor functionality is temporarily disabled.");
-}
-
-DBCursor::DBCursor() : impl_(nullptr), ctx_(inert_context) {
-    // throw std::runtime_error("Cursor functionality is temporarily disabled.");
-}
-
-DBCursor::DBCursor(Database *db, const TxnContext &ctx, uint32_t collection_idx, std::string_view start_key, std::optional<std::string_view> end_key)
-    : impl_(std::make_unique<MergedCursorImpl>(db, ctx, collection_idx, start_key, end_key)), ctx_(ctx) {
-    throw std::runtime_error("Cursor functionality is temporarily disabled.");
-}
-
-DBCursor::DBCursor(Database *db, const TxnContext &ctx, StaxTree *tree, std::optional<std::string_view> end_key, bool raw_mode)
-    : db_(db), ctx_(ctx), tree_(tree), is_valid_(false), raw_mode_(raw_mode)
-{
-    throw std::runtime_error("Cursor functionality is temporarily disabled.");
-}
-
-DBCursor::DBCursor(Database *db, const TxnContext &ctx, StaxTree *tree, std::string_view start_key, std::optional<std::string_view> end_key, bool raw_mode)
-    : db_(db), ctx_(ctx), tree_(tree), is_valid_(false), raw_mode_(raw_mode)
-{
-    throw std::runtime_error("Cursor functionality is temporarily disabled.");
-}
+DBCursor::DBCursor() : ctx_(inert_context) {}
 
 DBCursor::~DBCursor() = default;
 
-bool DBCursor::is_valid() const
+DBCursor::DBCursor(StaxTree16* tree, const TxnContext& ctx, std::string_view start_key, std::optional<std::string_view> end_key)
+    : tree_(tree),
+      ctx_(ctx),
+      is_valid_(false),
+      current_record_(nullptr),
+      start_key_buffer_(start_key),
+      start_key_view_(start_key_buffer_)
 {
-    if (impl_) return impl_->is_valid_;
+    if (end_key) {
+        end_key_buffer_ = *end_key;
+        end_key_view_ = end_key_buffer_;
+        has_end_key_ = true;
+    }
+    find_initial_leaf();
+}
+
+bool DBCursor::is_valid() const {
     return is_valid_;
 }
 
-std::string_view DBCursor::key() const
-{
-    if (impl_) return impl_->last_key_view_;
-    return std::string_view(current_key_ptr_, current_key_len_);
+std::string_view DBCursor::key() const {
+    return is_valid_ ? current_record_->get_key() : std::string_view{};
 }
 
-DataView DBCursor::value() const
-{
-    if (impl_) return impl_->is_valid_ ? DataView(impl_->current_record_data_.value_ptr, impl_->current_record_data_.value_len) : DataView{};
+DataView DBCursor::value() const {
     if (!is_valid_) return {};
-    return DataView(current_record_data_.value_ptr, current_record_data_.value_len);
+    return DataView(current_record_->get_value_data(), current_record_->value_len);
 }
 
-void DBCursor::advance_to_next_physical_leaf()
-{
-    throw std::runtime_error("Cursor functionality is temporarily disabled.");
+void DBCursor::next() {
+    if (!is_valid_) return;
+    is_valid_ = false;
+    current_record_ = nullptr;
+    advance_to_next_valid();
 }
 
-void DBCursor::next()
-{
-    if (impl_) {
-        impl_->advance();
+bool DBCursor::is_visible(StaxRecord* record) {
+    while(record) {
+        if (record->txn_id <= ctx_.read_snapshot_id) {
+            return !record->is_deleted;
+        }
+        record = tree_->get_allocator().get_ptr<StaxRecord>(record->prev_version_offset);
+    }
+    return false;
+}
+
+void DBCursor::find_initial_leaf() {
+    uint64_t current_ptr = tree_->get_root_ptr().load(std::memory_order_acquire);
+    if (current_ptr == 0) {
+        is_valid_ = false;
         return;
     }
-    throw std::runtime_error("Cursor functionality is temporarily disabled.");
+
+    std::string_view search_key = start_key_view_;
+
+    while(current_ptr != 0 && !StaxTree16::is_leaf(current_ptr)) {
+        path_stack_.push(current_ptr);
+        InternalNode* node = tree_->get_allocator().get_ptr<InternalNode>(StaxTree16::get_offset(current_ptr));
+        uint32_t test_idx = StaxTree16::get_test_idx(current_ptr);
+        int nibble = StaxTree16::get_nibble_at(search_key, test_idx);
+        current_ptr = node->children[nibble].load(std::memory_order_relaxed);
+    }
+
+    if (current_ptr != 0) {
+       path_stack_.push(current_ptr);
+    }
+
+    advance_to_next_valid();
 }
 
-void DBCursor::validate_current_leaf()
-{
-    throw std::runtime_error("Cursor functionality is temporarily disabled.");
+void DBCursor::advance_to_next_valid() {
+    while (!path_stack_.empty()) {
+        uint64_t current_ptr = path_stack_.top();
+        path_stack_.pop();
+
+        if (StaxTree16::is_leaf(current_ptr)) {
+            StaxRecord* record = tree_->get_allocator().get_ptr<StaxRecord>(StaxTree16::get_offset(current_ptr));
+            if (record->get_key() < start_key_view_) {
+                continue;
+            }
+            if (has_end_key_ && record->get_key() >= end_key_view_) {
+                continue;
+            }
+
+            if (is_visible(record)) {
+                is_valid_ = true;
+                current_record_ = record;
+                return;
+            }
+        } else { // Internal Node
+            InternalNode* node = tree_->get_allocator().get_ptr<InternalNode>(StaxTree16::get_offset(current_ptr));
+            for (int i = 15; i >= 0; --i) {
+                uint64_t child_ptr = node->children[i].load(std::memory_order_relaxed);
+                if (child_ptr != 0) {
+                    path_stack_.push(child_ptr);
+                }
+            }
+        }
+    }
+    is_valid_ = false;
 }
-
-
-// =================================================================================================
-// --- End of Disabled Cursor Code ---
-// =================================================================================================
 
 thread_local HybridTimestampGenerator::ThreadTxnIDGenerator HybridTimestampGenerator::tls_generator_;
 
@@ -576,16 +601,16 @@ void Database::compact(const std::filesystem::path &db_directory, size_t num_thr
 
         if (flatten)
         {
-            std::unordered_map<std::string, RecordData> latest_versions;
+            std::unordered_map<std::string, StaxRecord*> latest_versions;
             for (auto cursor = source_collection.seek_first(compaction_read_ctx); cursor->is_valid(); cursor->next())
             {
-                latest_versions[std::string(cursor->key())] = cursor->current_record_data_;
+                latest_versions[std::string(cursor->key())] = cursor->get_current_record();
             }
             for (const auto &pair : latest_versions)
             {
-                if (!pair.second.is_deleted)
+                if (!pair.second->is_deleted)
                 {
-                    dest_collection.insert(compaction_write_ctx, write_batch, pair.first, pair.second.value_view());
+                    dest_collection.insert(compaction_write_ctx, write_batch, pair.first, pair.second->get_value());
                 }
             }
         }
@@ -690,7 +715,7 @@ Collection::Collection(Database *parent_db, DbGeneration *owning_generation, uin
 {
     CollectionEntry &entry = owning_generation_->get_collection_entry_ref(collection_idx);
 
-    critbit_tree_ = std::make_unique<StaxTree>(
+    tree_ = std::make_unique<StaxTree16>(
         *owning_generation_->stax_allocator,
         entry.root_node_ptr);
 }
@@ -716,7 +741,7 @@ void Collection::insert(const TxnContext &ctx, TransactionBatch &batch, std::str
         throw std::runtime_error("Cannot perform writes in a read-only transaction context.");
 
     ThreadLocalAllocator& local_alloc = parent_db_->get_thread_local_allocator(ctx.thread_id);
-    critbit_tree_->insert(local_alloc, ctx, key, value, false);
+    tree_->insert(local_alloc, ctx, key, value, false);
 
     batch.logical_item_count_delta++;
     // TODO: This size is not quite right, but it's a placeholder.
@@ -728,7 +753,7 @@ void Collection::remove(const TxnContext &ctx, TransactionBatch &batch, std::str
     if (ctx.txn_id == 0)
         throw std::runtime_error("Cannot perform writes in a read-only transaction context.");
     ThreadLocalAllocator& local_alloc = parent_db_->get_thread_local_allocator(ctx.thread_id);
-    critbit_tree_->remove(local_alloc, ctx, key);
+    tree_->remove(local_alloc, ctx, key);
     batch.logical_item_count_delta--;
 }
 
@@ -738,7 +763,7 @@ std::optional<RecordData> Collection::get(const TxnContext &ctx, std::string_vie
     {
         if (collection_idx_ < gen_ptr->owned_collections.size() && gen_ptr->owned_collections[collection_idx_])
         {
-            auto result = gen_ptr->owned_collections[collection_idx_]->get_critbit_tree().get(ctx, key);
+            auto result = gen_ptr->owned_collections[collection_idx_]->get_tree().get(ctx, key);
             if (result.has_value())
             {
                 return result;
@@ -753,7 +778,7 @@ void Collection::insert_sync_direct(std::string_view key, std::string_view value
     TxnContext ctx = parent_db_->begin_transaction_context(thread_id, false);
     TransactionBatch batch;
     ThreadLocalAllocator& local_alloc = parent_db_->get_thread_local_allocator(thread_id);
-    critbit_tree_->insert(local_alloc, ctx, key, value, false);
+    tree_->insert(local_alloc, ctx, key, value, false);
     batch.logical_item_count_delta++;
     batch.live_record_bytes_delta += (key.length() + value.length() + sizeof(StaxRecord));
     parent_db_->commit(ctx, collection_idx_, batch);
@@ -764,22 +789,22 @@ void Collection::remove_sync_direct(std::string_view key, size_t thread_id)
     TxnContext ctx = parent_db_->begin_transaction_context(thread_id, false);
     TransactionBatch batch;
     ThreadLocalAllocator& local_alloc = parent_db_->get_thread_local_allocator(thread_id);
-    critbit_tree_->remove(local_alloc, ctx, key);
+    tree_->remove(local_alloc, ctx, key);
     batch.logical_item_count_delta--;
     parent_db_->commit(ctx, collection_idx_, batch);
 }
 
 std::unique_ptr<DBCursor> Collection::seek(const TxnContext &ctx, std::string_view start_key, std::optional<std::string_view> end_key)
 {
-    return std::make_unique<DBCursor>(parent_db_, ctx, collection_idx_, start_key, end_key);
+    return std::make_unique<DBCursor>(&get_tree(), ctx, start_key, end_key);
 }
 
 std::unique_ptr<DBCursor> Collection::seek_first(const TxnContext &ctx, std::optional<std::string_view> end_key)
 {
-    return std::make_unique<DBCursor>(parent_db_, ctx, collection_idx_, "", end_key);
+    return std::make_unique<DBCursor>(&get_tree(), ctx, "", end_key);
 }
 
 std::unique_ptr<DBCursor> Collection::seek_raw(const TxnContext &ctx, std::string_view start_key, std::optional<std::string_view> end_key)
 {
-    return std::make_unique<DBCursor>(parent_db_, ctx, &this->get_critbit_tree(), start_key, end_key, true);
+    return std::make_unique<DBCursor>(&this->get_tree(), ctx, start_key, end_key);
 }

@@ -91,3 +91,14 @@ struct StaxObjectProperty {
     StaxPropertyType type;
     StaxPropertyValue value;
 };
+
+struct RecordData {
+    const char* key_ptr;
+    uint32_t key_len;
+    const char* value_ptr;
+    uint32_t value_len;
+    bool is_deleted;
+
+    std::string_view key_view() const { return std::string_view(key_ptr, key_len); }
+    std::string_view value_view() const { return std::string_view(value_ptr, value_len); }
+};
