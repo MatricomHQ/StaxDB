@@ -43,10 +43,20 @@ void run_all_benchmarks() {
     std::cout << "******************************************************************************************" << std::endl;
 
 
-        
-    GraphBench::run_graph_benchmark();
+    std::future<void> future = std::async(std::launch::async, GraphBench::run_graph_benchmark);
+    std::cout << "Starting graph benchmark with 20-second timeout..." << std::endl;
+    if (future.wait_for(std::chrono::seconds(20)) == std::future_status::timeout) {
+        std::cerr << "!!! Graph benchmark timed out after 20 seconds. Terminating." << std::endl;
+        std::terminate();
+    }
+    try {
+        future.get();
+    } catch (const std::exception& e) {
+        std::cerr << "Graph benchmark threw an exception: " << e.what() << std::endl;
+        std::terminate();
+    }
+    std::cout << "Graph benchmark finished within the time limit." << std::endl;
 
-    
     TreeBench::run_tree_stress_test();
 
     RangeScanBench::run_prefix_range_benchmark();

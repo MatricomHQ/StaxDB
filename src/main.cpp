@@ -2,14 +2,13 @@
 
 #include <iostream>
 #include <exception>
-#include <thread> 
-#include <chrono> 
-#include <future> 
+#include <thread>
+#include <chrono>
+#include <future>
 
 
-#include "benchmarks/benchmarks.h" 
-#include "tests/tests.h" 
-#include "benchmarks/tcp_bench.h" 
+#include "benchmarks/benchmarks.h"
+#include "tests/tests.h"
 
 
 #define TCP_SERVER_PORT 13371

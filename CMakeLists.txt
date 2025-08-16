@@ -128,19 +128,10 @@ add_executable(stax_benchmark
 )
 target_link_libraries(stax_benchmark PRIVATE stax_graph stax_common)
 
-# --- Boost.Asio Integration ---
-find_package(Boost REQUIRED COMPONENTS system)
-# Corrected include directory for Asio
-
-# Link benchmark runner to Boost
-target_link_libraries(stax_benchmark PRIVATE Boost::system)
-# On Unix-like systems, real-time extensions for clocks/threads may be needed for Asio
+# On Unix-like systems, real-time extensions for clocks/threads may be needed.
 if(UNIX AND NOT APPLE)
-    target_link_libraries(stax_benchmark PRIVATE rt) # Linked to stax_benchmark
+    target_link_libraries(stax_benchmark PRIVATE rt)
 endif()
-
-# Removed separate executables for TCP server and client.
-# Their source files are now part of stax_benchmark.
 
 # --- INSTALL STEP ---
 # This will install the shared library to <prefix>/lib and executables to <prefix>/bin

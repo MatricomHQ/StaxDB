@@ -321,14 +321,17 @@ void GraphReader::get_objects_by_property_range_into_roaring(std::string_view fi
     to_binary_key_buf(end_numeric_val, end_val_buf, sizeof(end_val_buf));
     std::string end_key_exclusive = std::string(field_name) + KEY_SEPARATOR + std::string(end_val_buf, sizeof(end_val_buf)) + KEY_SEPARATOR + '\xff';
 
-    // Workaround for lack of end_key in range scans. We scan from the beginning of the partition (field_name)
-    // and manually filter.
     std::string field_prefix = std::string(field_name) + KEY_SEPARATOR;
-    for (const auto& record : fvo_col_->get_critbit_tree().range(ctx_, field_prefix)) {
+    for (const auto& record : fvo_col_->get_critbit_tree().range(ctx_, start_key)) {
         std::string_view key_view = record.key_view();
         
-        if (key_view < start_key) continue;
-        if (key_view >= end_key_exclusive) break;
+        if (!key_view.starts_with(field_prefix)) {
+            break;
+        }
+
+        if (key_view >= end_key_exclusive) {
+            break;
+        }
 
         size_t expected_id_offset = field_name.length() + 1 + GraphTransaction::BINARY_U64_SIZE + 1;
         if (key_view.length() == expected_id_offset + GraphTransaction::BINARY_U32_SIZE) {
