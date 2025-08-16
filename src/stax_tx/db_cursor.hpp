@@ -52,7 +52,7 @@ private:
     const TxnContext& ctx_;
     bool is_valid_ = false;
 
-    std::stack<uint64_t> path_stack_;
+    std::stack<std::pair<uint64_t, int>> path_stack_;
     StaxRecord* current_record_ = nullptr;
     
     std::string start_key_buffer_;

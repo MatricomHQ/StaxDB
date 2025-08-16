@@ -112,41 +112,32 @@ bool DBCursor::is_visible(StaxRecord* record) {
 }
 
 void DBCursor::find_initial_leaf() {
-    uint64_t current_ptr = tree_->get_root_ptr().load(std::memory_order_acquire);
-    if (current_ptr == 0) {
+    uint64_t root_ptr = tree_->get_root_ptr().load(std::memory_order_acquire);
+    if (root_ptr == 0) {
         is_valid_ = false;
         return;
     }
-
-    std::string_view search_key = start_key_view_;
-
-    while(current_ptr != 0 && !StaxTree16::is_leaf(current_ptr)) {
-        path_stack_.push(current_ptr);
-        InternalNode* node = tree_->get_allocator().get_ptr<InternalNode>(StaxTree16::get_offset(current_ptr));
-        uint32_t test_idx = StaxTree16::get_test_idx(current_ptr);
-        int nibble = StaxTree16::get_nibble_at(search_key, test_idx);
-        current_ptr = node->children[nibble].load(std::memory_order_relaxed);
-    }
-
-    if (current_ptr != 0) {
-       path_stack_.push(current_ptr);
-    }
-
+    path_stack_.push({root_ptr, 0});
     advance_to_next_valid();
 }
 
 void DBCursor::advance_to_next_valid() {
     while (!path_stack_.empty()) {
-        uint64_t current_ptr = path_stack_.top();
-        path_stack_.pop();
+        uint64_t current_ptr = path_stack_.top().first;
+        int& child_idx = path_stack_.top().second;
 
         if (StaxTree16::is_leaf(current_ptr)) {
+            path_stack_.pop();
             StaxRecord* record = tree_->get_allocator().get_ptr<StaxRecord>(StaxTree16::get_offset(current_ptr));
+
             if (record->get_key() < start_key_view_) {
                 continue;
             }
+
             if (has_end_key_ && record->get_key() >= end_key_view_) {
-                continue;
+                // Since we are traversing in order, we can stop.
+                is_valid_ = false;
+                return;
             }
 
             if (is_visible(record)) {
@@ -154,13 +145,16 @@ void DBCursor::advance_to_next_valid() {
                 current_record_ = record;
                 return;
             }
-        } else { // Internal Node
-            InternalNode* node = tree_->get_allocator().get_ptr<InternalNode>(StaxTree16::get_offset(current_ptr));
-            for (int i = 15; i >= 0; --i) {
-                uint64_t child_ptr = node->children[i].load(std::memory_order_relaxed);
+        } else { // Internal node
+            if (child_idx < 16) {
+                InternalNode* node = tree_->get_allocator().get_ptr<InternalNode>(StaxTree16::get_offset(current_ptr));
+                uint64_t child_ptr = node->children[child_idx].load(std::memory_order_relaxed);
+                child_idx++;
                 if (child_ptr != 0) {
-                    path_stack_.push(child_ptr);
+                    path_stack_.push({child_ptr, 0});
                 }
+            } else {
+                path_stack_.pop();
             }
         }
     }
