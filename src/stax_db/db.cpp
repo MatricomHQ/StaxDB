@@ -604,7 +604,7 @@ void Database::compact(const std::filesystem::path &db_directory, size_t num_thr
             {
                 if (!pair.second->is_deleted)
                 {
-                    dest_collection.insert(compaction_write_ctx, write_batch, pair.first, pair.second->get_value());
+                    dest_collection.insert(compaction_write_ctx, write_batch, pair.first, std::string_view(pair.second->get_value_data(), pair.second->value_len));
                 }
             }
         }
