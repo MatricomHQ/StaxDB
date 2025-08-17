@@ -45,7 +45,7 @@ private:
     friend class Database; 
 
     void find_initial_leaf();
-    void advance_to_next_valid();
+    void advance_to_next_valid(bool is_initial_seek = false);
     bool is_visible(StaxRecord* record);
 
     StaxTree16* tree_ = nullptr;

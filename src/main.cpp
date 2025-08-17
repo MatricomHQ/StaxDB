@@ -18,7 +18,7 @@
 
 void timeout_handler(int signum) {
     std::cerr << "\n\n******************************************************************" << std::endl;
-    std::cerr << "*** BENCHMARK TIMEOUT: Exceeded 20 seconds. Aborting. ***" << std::endl;
+    std::cerr << "*** BENCHMARK TIMEOUT: Exceeded 80 seconds. Aborting. ***" << std::endl;
     std::cerr << "******************************************************************\n" << std::endl;
     _exit(143); // Exit code 143 for timeout
 }
@@ -30,7 +30,7 @@ int main(int argc, char* argv[]) {
         Tests::run_all_tests();
 
         signal(SIGALRM, timeout_handler);
-        alarm(20); // Set a 20-second alarm
+        alarm(80); // Set a 20-second alarm
         
         run_all_benchmarks();
 

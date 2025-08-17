@@ -94,13 +94,6 @@ DataView DBCursor::value() const {
     return DataView(current_record_->get_value_data(), current_record_->value_len);
 }
 
-void DBCursor::next() {
-    if (!is_valid_) return;
-    is_valid_ = false;
-    current_record_ = nullptr;
-    advance_to_next_valid();
-}
-
 bool DBCursor::is_visible(StaxRecord* record) {
     while(record) {
         if (record->txn_id <= ctx_.read_snapshot_id) {
@@ -118,10 +111,18 @@ void DBCursor::find_initial_leaf() {
         return;
     }
     path_stack_.push({root_ptr, 0});
-    advance_to_next_valid();
+    advance_to_next_valid(true); // Start with seek mode enabled
 }
 
-void DBCursor::advance_to_next_valid() {
+void DBCursor::next() {
+    if (!is_valid_) return;
+    advance_to_next_valid(false); // Subsequent calls are in scan mode
+}
+
+void DBCursor::advance_to_next_valid(bool is_initial_seek) {
+    is_valid_ = false;
+    current_record_ = nullptr;
+
     while (!path_stack_.empty()) {
         uint64_t current_ptr = path_stack_.top().first;
         int& child_idx = path_stack_.top().second;
@@ -135,8 +136,7 @@ void DBCursor::advance_to_next_valid() {
             }
 
             if (has_end_key_ && record->get_key() >= end_key_view_) {
-                // Since we are traversing in order, we can stop.
-                is_valid_ = false;
+                path_stack_ = {};
                 return;
             }
 
@@ -145,20 +145,49 @@ void DBCursor::advance_to_next_valid() {
                 current_record_ = record;
                 return;
             }
-        } else { // Internal node
-            if (child_idx < 16) {
-                InternalNode* node = tree_->get_allocator().get_ptr<InternalNode>(StaxTree16::get_offset(current_ptr));
-                uint64_t child_ptr = node->children[child_idx].load(std::memory_order_relaxed);
-                child_idx++;
-                if (child_ptr != 0) {
-                    path_stack_.push({child_ptr, 0});
-                }
-            } else {
-                path_stack_.pop();
+            continue;
+        }
+
+        // Internal Node
+        InternalNode* node = tree_->get_allocator().get_ptr<InternalNode>(StaxTree16::get_offset(current_ptr));
+
+        // In seek mode, we can jump to the correct starting nibble.
+        if (is_initial_seek) {
+            uint32_t test_idx = StaxTree16::get_test_idx(current_ptr);
+            int nibble = StaxTree16::get_nibble_at(start_key_view_, test_idx);
+            if (nibble > child_idx) {
+                child_idx = nibble;
             }
         }
+
+        bool found_child = false;
+        for (int i = child_idx; i < 16; ++i) {
+            uint64_t child_ptr = node->children[i].load(std::memory_order_relaxed);
+            if (child_ptr != 0) {
+                path_stack_.top().second = i + 1;
+                path_stack_.push({child_ptr, 0});
+                
+                // After we descend once, we are no longer in the initial seek phase
+                // for the levels below.
+                if (is_initial_seek) {
+                    StaxRecord* rep_record = tree_->get_allocator().get_ptr<StaxRecord>(node->representative_leaf_offset);
+                    uint32_t test_idx = StaxTree16::get_test_idx(current_ptr);
+                    if (StaxTree16::get_nibble_at(rep_record->get_key(), test_idx) < i) {
+                         is_initial_seek = false;
+                    }
+                }
+
+                found_child = true;
+                break;
+            }
+        }
+        
+        if (!found_child) {
+            path_stack_.pop();
+            // When we backtrack, we are no longer in a direct-path seek.
+            is_initial_seek = false;
+        }
     }
-    is_valid_ = false;
 }
 
 thread_local HybridTimestampGenerator::ThreadTxnIDGenerator HybridTimestampGenerator::tls_generator_;

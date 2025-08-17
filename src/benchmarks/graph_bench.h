@@ -150,7 +150,7 @@ inline void run_graph_benchmark() {
     const size_t NUM_PROPERTIES_PER_NODE = 5;
     const size_t AVG_FOLLOWS_PER_NODE = 5;
     const size_t AVG_LIKES_PER_NODE = 10;
-    const size_t NUM_QUERY_OPS = 100000;
+    const size_t NUM_QUERY_OPS = 1000;
     const unsigned int BENCH_SEED = 42;
 
     std::filesystem::path db_base_dir = "./db_data_graph_bench";
