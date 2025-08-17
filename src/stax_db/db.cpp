@@ -112,59 +112,59 @@ bool DBCursor::is_visible(StaxRecord* record) {
 }
 
 void DBCursor::find_initial_leaf() {
-    uint64_t current_ptr = tree_->get_root_ptr().load(std::memory_order_acquire);
-    if (current_ptr == 0) {
-        is_valid_ = false;
-        return;
+    uint64_t root_ptr = tree_->get_root_ptr().load(std::memory_order_acquire);
+    if (root_ptr != 0) {
+        path_stack_.push({root_ptr, true, has_end_key_});
     }
-
-    std::string_view search_key = start_key_view_;
-
-    while(current_ptr != 0 && !StaxTree16::is_leaf(current_ptr)) {
-        path_stack_.push(current_ptr);
-        InternalNode* node = tree_->get_allocator().get_ptr<InternalNode>(StaxTree16::get_offset(current_ptr));
-        uint32_t test_idx = StaxTree16::get_test_idx(current_ptr);
-        int nibble = StaxTree16::get_nibble_at(search_key, test_idx);
-        current_ptr = node->children[nibble].load(std::memory_order_relaxed);
-    }
-
-    if (current_ptr != 0) {
-       path_stack_.push(current_ptr);
-    }
-
     advance_to_next_valid();
 }
 
 void DBCursor::advance_to_next_valid() {
     while (!path_stack_.empty()) {
-        uint64_t current_ptr = path_stack_.top();
+        ScanState current_state = path_stack_.top();
         path_stack_.pop();
 
-        if (StaxTree16::is_leaf(current_ptr)) {
-            StaxRecord* record = tree_->get_allocator().get_ptr<StaxRecord>(StaxTree16::get_offset(current_ptr));
-            if (record->get_key() < start_key_view_) {
+        uint64_t node_ptr = current_state.node_ptr;
+        bool lower_bound_active = current_state.has_lower_bound;
+        bool upper_bound_active = current_state.has_upper_bound;
+
+        if (StaxTree16::is_leaf(node_ptr)) {
+            StaxRecord* record_head = tree_->get_allocator().get_ptr<StaxRecord>(StaxTree16::get_offset(node_ptr));
+            std::string_view key = record_head->get_key();
+
+            if (lower_bound_active && key < start_key_view_) {
                 continue;
             }
-            if (has_end_key_ && record->get_key() >= end_key_view_) {
+            if (upper_bound_active && key > end_key_view_) {
                 continue;
             }
 
-            if (is_visible(record)) {
+            StaxRecord* visible_record = tree_->get_visible_record(record_head, ctx_);
+
+            if (visible_record) {
                 is_valid_ = true;
-                current_record_ = record;
+                current_record_ = visible_record;
                 return;
             }
         } else { // Internal Node
-            InternalNode* node = tree_->get_allocator().get_ptr<InternalNode>(StaxTree16::get_offset(current_ptr));
-            for (int i = 15; i >= 0; --i) {
-                uint64_t child_ptr = node->children[i].load(std::memory_order_relaxed);
-                if (child_ptr != 0) {
-                    path_stack_.push(child_ptr);
-                }
+            InternalNode* node = tree_->get_allocator().get_ptr<InternalNode>(StaxTree16::get_offset(node_ptr));
+            uint32_t test_idx = StaxTree16::get_test_idx(node_ptr);
+
+            int start_nibble = lower_bound_active ? StaxTree16::get_nibble_at(start_key_view_, test_idx) : 0;
+            int end_nibble = upper_bound_active ? StaxTree16::get_nibble_at(end_key_view_, test_idx) : 15;
+
+            for (int i = end_nibble; i >= start_nibble; --i) {
+                uint64_t child_ptr = node->children[i].load(std::memory_order_acquire);
+                if (!child_ptr) continue;
+
+                bool new_has_lower_bound = lower_bound_active && (i == start_nibble);
+                bool new_has_upper_bound = upper_bound_active && (i == end_nibble);
+
+                path_stack_.push({child_ptr, new_has_lower_bound, new_has_upper_bound});
             }
         }
     }
-    is_valid_ = false;
+    is_valid_ = false; // No more valid records found
 }
 
 thread_local HybridTimestampGenerator::ThreadTxnIDGenerator HybridTimestampGenerator::tls_generator_;

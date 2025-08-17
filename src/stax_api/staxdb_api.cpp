@@ -268,21 +268,23 @@ StaxResultSet staxdb_execute_range_query(Database* db_instance, StaxCollection c
             end_key = to_string_view(options->end_key);
         }
 
-        
-        for (auto cursor = col.seek(ctx, start_key, end_key); cursor->is_valid(); cursor->next()) {
-            std::string_view key_sv = cursor->key();
-            DataView value_dv = cursor->value();
+        std::vector<StaxRecord*> records;
+        col.get_tree().range_scan(ctx, start_key, end_key, records);
+
+        for (StaxRecord* record : records) {
+            std::string_view key_sv = record->get_key();
+            std::string_view value_sv = record->get_value();
             
             size_t key_offset = kv_data->data_buffer.size();
             kv_data->data_buffer.insert(kv_data->data_buffer.end(), key_sv.begin(), key_sv.end());
             
             size_t value_offset = kv_data->data_buffer.size();
-            kv_data->data_buffer.insert(kv_data->data_buffer.end(), value_dv.data, value_dv.data + value_dv.len);
+            kv_data->data_buffer.insert(kv_data->data_buffer.end(), value_sv.begin(), value_sv.end());
 
             
             kv_data->kv_pairs.push_back({
                 {reinterpret_cast<const char*>(key_offset), key_sv.length()},
-                {reinterpret_cast<const char*>(value_offset), value_dv.len}
+                {reinterpret_cast<const char*>(value_offset), value_sv.length()}
             });
         }
 

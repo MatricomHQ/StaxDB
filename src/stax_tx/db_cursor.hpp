@@ -21,6 +21,12 @@ namespace {
 }
 
 
+struct ScanState {
+    uint64_t node_ptr;
+    bool has_lower_bound;
+    bool has_upper_bound;
+};
+
 class DBCursor {
 public:
     DBCursor();
@@ -52,7 +58,7 @@ private:
     const TxnContext& ctx_;
     bool is_valid_ = false;
 
-    std::stack<uint64_t> path_stack_;
+    std::stack<ScanState> path_stack_;
     StaxRecord* current_record_ = nullptr;
     
     std::string start_key_buffer_;
