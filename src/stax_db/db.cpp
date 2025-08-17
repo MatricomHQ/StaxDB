@@ -94,100 +94,97 @@ DataView DBCursor::value() const {
     return DataView(current_record_->get_value_data(), current_record_->value_len);
 }
 
+void DBCursor::next() {
+    if (!is_valid_) return;
+    is_valid_ = false;
+    current_record_ = nullptr;
+    advance_to_next_valid();
+}
+
 bool DBCursor::is_visible(StaxRecord* record) {
-    while(record) {
-        if (record->txn_id <= ctx_.read_snapshot_id) {
-            return !record->is_deleted;
+    StaxRecord* current_rec = record;
+    while (current_rec != nullptr) {
+        if (current_rec->txn_id <= ctx_.read_snapshot_id) {
+            if (current_rec->is_deleted) {
+                return false;
+            }
+            // Update current_record_ to point to the visible version
+            current_record_ = current_rec;
+            return true;
         }
-        record = tree_->get_allocator().get_ptr<StaxRecord>(record->prev_version_offset);
+        current_rec = tree_->get_allocator().get_ptr<StaxRecord>(current_rec->prev_version_offset);
     }
     return false;
 }
 
 void DBCursor::find_initial_leaf() {
-    uint64_t root_ptr = tree_->get_root_ptr().load(std::memory_order_acquire);
-    if (root_ptr == 0) {
+    uint64_t current_ptr = tree_->get_root_ptr().load(std::memory_order_acquire);
+    if (current_ptr == 0) {
         is_valid_ = false;
         return;
     }
-    path_stack_.push({root_ptr, 0});
-    advance_to_next_valid(true); // Start with seek mode enabled
+
+    // This loop descends the tree to find the first potential leaf.
+    while (current_ptr != 0) {
+        if (StaxTree16::is_leaf(current_ptr)) {
+            path_stack_.push({current_ptr, 0});
+            break;
+        }
+
+        InternalNode* node = tree_->get_allocator().get_ptr<InternalNode>(StaxTree16::get_offset(current_ptr));
+        uint32_t test_idx = StaxTree16::get_test_idx(current_ptr);
+        int start_nibble = StaxTree16::get_nibble_at(start_key_view_, test_idx);
+
+        // Push the parent and the next child index to check.
+        // This is for backtracking during `advance_to_next_valid`.
+        path_stack_.push({current_ptr, start_nibble + 1});
+
+        current_ptr = node->children[start_nibble].load(std::memory_order_relaxed);
+    }
+    
+    advance_to_next_valid();
 }
 
-void DBCursor::next() {
-    if (!is_valid_) return;
-    advance_to_next_valid(false); // Subsequent calls are in scan mode
-}
-
-void DBCursor::advance_to_next_valid(bool is_initial_seek) {
-    is_valid_ = false;
-    current_record_ = nullptr;
-
+void DBCursor::advance_to_next_valid() {
     while (!path_stack_.empty()) {
         uint64_t current_ptr = path_stack_.top().first;
         int& child_idx = path_stack_.top().second;
 
         if (StaxTree16::is_leaf(current_ptr)) {
             path_stack_.pop();
-            StaxRecord* record = tree_->get_allocator().get_ptr<StaxRecord>(StaxTree16::get_offset(current_ptr));
+            StaxRecord* record_head = tree_->get_allocator().get_ptr<StaxRecord>(StaxTree16::get_offset(current_ptr));
 
-            if (record->get_key() < start_key_view_) {
+            if (record_head->get_key() < start_key_view_) {
                 continue;
             }
 
-            if (has_end_key_ && record->get_key() >= end_key_view_) {
-                path_stack_ = {};
+            if (has_end_key_ && record_head->get_key() >= end_key_view_) {
+                // We've gone past our range. Since we traverse in order, we can stop.
+                // Clear the stack to invalidate the cursor for subsequent `next` calls.
+                while(!path_stack_.empty()) path_stack_.pop();
+                is_valid_ = false;
                 return;
             }
 
-            if (is_visible(record)) {
+            if (is_visible(record_head)) {
                 is_valid_ = true;
-                current_record_ = record;
+                // current_record_ is set inside is_visible
                 return;
             }
-            continue;
-        }
-
-        // Internal Node
-        InternalNode* node = tree_->get_allocator().get_ptr<InternalNode>(StaxTree16::get_offset(current_ptr));
-
-        // In seek mode, we can jump to the correct starting nibble.
-        if (is_initial_seek) {
-            uint32_t test_idx = StaxTree16::get_test_idx(current_ptr);
-            int nibble = StaxTree16::get_nibble_at(start_key_view_, test_idx);
-            if (nibble > child_idx) {
-                child_idx = nibble;
-            }
-        }
-
-        bool found_child = false;
-        for (int i = child_idx; i < 16; ++i) {
-            uint64_t child_ptr = node->children[i].load(std::memory_order_relaxed);
-            if (child_ptr != 0) {
-                path_stack_.top().second = i + 1;
-                path_stack_.push({child_ptr, 0});
-                
-                // After we descend once, we are no longer in the initial seek phase
-                // for the levels below.
-                if (is_initial_seek) {
-                    StaxRecord* rep_record = tree_->get_allocator().get_ptr<StaxRecord>(node->representative_leaf_offset);
-                    uint32_t test_idx = StaxTree16::get_test_idx(current_ptr);
-                    if (StaxTree16::get_nibble_at(rep_record->get_key(), test_idx) < i) {
-                         is_initial_seek = false;
-                    }
+        } else { // Internal node
+            if (child_idx < 16) {
+                InternalNode* node = tree_->get_allocator().get_ptr<InternalNode>(StaxTree16::get_offset(current_ptr));
+                uint64_t child_ptr = node->children[child_idx].load(std::memory_order_relaxed);
+                child_idx++;
+                if (child_ptr != 0) {
+                    path_stack_.push({child_ptr, 0});
                 }
-
-                found_child = true;
-                break;
+            } else {
+                path_stack_.pop();
             }
-        }
-        
-        if (!found_child) {
-            path_stack_.pop();
-            // When we backtrack, we are no longer in a direct-path seek.
-            is_initial_seek = false;
         }
     }
+    is_valid_ = false; // Stack is empty, no more records
 }
 
 thread_local HybridTimestampGenerator::ThreadTxnIDGenerator HybridTimestampGenerator::tls_generator_;
