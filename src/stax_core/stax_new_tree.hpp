@@ -318,19 +318,22 @@ public:
 };
 
 inline void StaxTree16::insert(ThreadLocalAllocator& local_alloc, const TxnContext &ctx, std::string_view key, std::string_view value, bool is_delete) {
-restart_operation:
     std::atomic<uint64_t>* parent_ptr_loc = &root_ptr_;
-    uint64_t current_ptr = root_ptr_.load(std::memory_order_acquire);
 
     while (true) {
+        uint64_t current_ptr = parent_ptr_loc->load(std::memory_order_acquire);
+
         if (current_ptr == 0) {
+            // Case 1: Empty slot. Create a new leaf.
             uint64_t new_record_offset = allocate_new_record(local_alloc, ctx, key, value, is_delete, 0);
             uint64_t new_leaf_ptr = make_leaf_ptr(new_record_offset);
             uint64_t expected = 0;
             if (parent_ptr_loc->compare_exchange_strong(expected, new_leaf_ptr, std::memory_order_release, std::memory_order_relaxed)) {
-                return;
+                return; // Success
             }
-            goto restart_operation;
+            // If CAS fails, another thread inserted a node here.
+            // The loop will re-read the pointer and continue from the same spot.
+            continue;
         }
 
         if (is_leaf(current_ptr)) {
@@ -339,14 +342,18 @@ restart_operation:
             std::string_view existing_key = existing_record->get_key();
 
             if (existing_key == key) {
+                // Case 2a: Key exists. Create a new version.
                 uint64_t new_record_offset = allocate_new_record(local_alloc, ctx, key, value, is_delete, leaf_offset);
                 uint64_t new_leaf_ptr = make_leaf_ptr(new_record_offset);
                 if (parent_ptr_loc->compare_exchange_strong(current_ptr, new_leaf_ptr, std::memory_order_release, std::memory_order_relaxed)) {
-                    return;
+                    return; // Success
                 }
-                goto restart_operation;
+                // If CAS fails, another thread modified this leaf.
+                // The loop will re-read the pointer and continue from the same spot.
+                continue;
             }
 
+            // Case 2b: Key mismatch. Create a new internal node to split the leaf.
             int d_idx = find_first_differing_nibble(key, existing_key);
             uint64_t new_internal_node_offset = local_alloc.allocate(sizeof(InternalNode), alignof(InternalNode));
             InternalNode* new_node = allocator_.get_ptr<InternalNode>(new_internal_node_offset);
@@ -364,11 +371,14 @@ restart_operation:
 
             uint64_t new_internal_ptr = make_internal_ptr(new_internal_node_offset, d_idx);
             if (parent_ptr_loc->compare_exchange_strong(current_ptr, new_internal_ptr, std::memory_order_release, std::memory_order_relaxed)) {
-                return;
+                return; // Success
             }
-            goto restart_operation;
+            // If CAS fails, another thread modified this leaf.
+            // The loop will re-read the pointer and continue from the same spot.
+            continue;
         }
 
+        // Case 3: Internal node.
         InternalNode* node = allocator_.get_ptr<InternalNode>(get_offset(current_ptr));
         StaxRecord* rep_record = allocator_.get_ptr<StaxRecord>(node->representative_leaf_offset);
         std::string_view rep_key = rep_record->get_key();
@@ -377,6 +387,7 @@ restart_operation:
         uint32_t test_idx = get_test_idx(current_ptr);
 
         if (d_idx < test_idx) {
+            // Case 3a: Path diverges. Create a new internal node to split the existing one.
             uint64_t new_internal_node_offset = local_alloc.allocate(sizeof(InternalNode), alignof(InternalNode));
             InternalNode* new_node = allocator_.get_ptr<InternalNode>(new_internal_node_offset);
             new (new_node) InternalNode();
@@ -393,14 +404,17 @@ restart_operation:
 
             uint64_t new_internal_ptr = make_internal_ptr(new_internal_node_offset, d_idx);
             if (parent_ptr_loc->compare_exchange_strong(current_ptr, new_internal_ptr, std::memory_order_release, std::memory_order_relaxed)) {
-                return;
+                return; // Success
             }
-            goto restart_operation;
+            // If CAS fails, another thread modified this node.
+            // The loop will re-read the pointer and continue from the same spot.
+            continue;
         }
-
+        
+        // Case 3b: Continue traversal.
         int nibble = get_nibble_at(key, test_idx);
         parent_ptr_loc = &node->children[nibble];
-        current_ptr = parent_ptr_loc->load(std::memory_order_acquire);
+        // The loop will continue from the new, deeper location.
     }
 }
 
