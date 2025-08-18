@@ -119,6 +119,29 @@ target_include_directories(stax_node_api INTERFACE
 target_link_libraries(stax_node_api INTERFACE stax_graph stax_db stax_tx stax_core stax_common)
 
 
+# --- New StaxCore Library ---
+add_library(staxcore STATIC
+    staxcore/src/staxcore.cpp
+)
+target_include_directories(staxcore PUBLIC
+    $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/staxcore/include>
+    $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/staxcore/src>
+)
+set_target_properties(staxcore PROPERTIES POSITION_INDEPENDENT_CODE ON)
+target_link_libraries(staxcore PUBLIC Threads::Threads)
+
+
+# --- New StaxCore Benchmark Executable ---
+add_executable(stax_core_benchmark
+    staxcore/bench/stax_benchmark.cpp
+)
+target_link_libraries(stax_core_benchmark PRIVATE staxcore)
+
+if(UNIX AND NOT APPLE)
+    target_link_libraries(stax_core_benchmark PRIVATE rt)
+endif()
+
+
 # --- Benchmark Runner Executable ---
 add_executable(stax_benchmark
     src/main.cpp

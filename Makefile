@@ -52,6 +52,26 @@ test:
 	@echo "--- Running Node.js Test Script ---"
 	@cd stax_js && npm test
 
+bench-core: build-cpp
+	@echo "--- Running StaxCore Benchmark ---"
+	@./bin/stax_core_benchmark
+
+bench-wasm:
+	@if ! command -v em++ >/dev/null 2>&1; then \
+		echo "WARNING: em++ command not found. Skipping WASM benchmark."; \
+		echo "Please make sure the Emscripten SDK is installed and activated."; \
+	else \
+		echo "--- Building and Running StaxCore WASM Benchmark ---"; \
+		mkdir -p ./bin; \
+		em++ -std=c++20 -O3 -DWASM_BUILD -sSINGLE_FILE=1 \
+			-sALLOW_MEMORY_GROWTH=1 -sINITIAL_MEMORY=314572800 \
+			-I staxcore/include -I staxcore/src \
+			staxcore/src/staxcore.cpp staxcore/bench/stax_benchmark.cpp \
+			-o ./bin/stax_core_benchmark.js; \
+		echo "--- Running WASM benchmark with Node.js ---"; \
+		node ./bin/stax_core_benchmark.js; \
+	fi
+
 # NEW: Target to explicitly run the Node.js profiling script
 profile:
 	@echo "--- Running Node.js Profiling Script ---"
