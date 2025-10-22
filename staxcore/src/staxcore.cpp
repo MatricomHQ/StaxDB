@@ -226,16 +226,8 @@ uint64_t StaxTree16::allocate_new_record(ThreadLocalAllocator& local_alloc, cons
     new_rec->key_len = key.length(); new_rec->value_len = value.length(); new_rec->txn_id = ctx.txn_id;
     new_rec->prev_version_offset = prev_version_offset; new_rec->is_deleted = is_delete;
 
-    // Optimized copy for small, fixed-size keys that are 8-byte aligned.
-    if (key.length() == 8) {
-        *(uint64_t*)(new_rec->get_key_data()) = *(const uint64_t*)(key.data());
-    } else {
-        memcpy(new_rec->get_key_data(), key.data(), key.length());
-    }
-
-    if(!value.empty()) {
-        memcpy(new_rec->get_value_data(), value.data(), value.length());
-    }
+    simd_memcpy(new_rec->get_key_data(), key.data(), key.length());
+    if(!value.empty()) simd_memcpy(new_rec->get_value_data(), value.data(), value.length());
     return offset;
 }
 void StaxTree16::remove(ThreadLocalAllocator& local_alloc, const TxnContext &ctx, std::string_view key) {

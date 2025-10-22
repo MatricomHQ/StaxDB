@@ -14,15 +14,16 @@ if(WIN32)
 endif()
 
 # Define build types
-set(CMAKE_BUILD_TYPE "Release" CACHE STRING "Choose the type of build." FORCE)
+set(CMAKE_BUILD_TYPE "RelWithDebInfo" CACHE STRING "Choose the type of build." FORCE)
 set_property(CACHE CMAKE_BUILD_TYPE PROPERTY STRINGS "Debug" "Release" "RelWithDebInfo" "MinSizeRel")
 
 # Set optimization flags conditionally. MSVC will use its defaults for Release/Debug.
 if(NOT MSVC)
-    set(CMAKE_C_FLAGS_RELEASE "-O3 -DNDEBUG" CACHE STRING "Flags used by the C compiler for release builds." FORCE)
-    set(CMAKE_CXX_FLAGS_RELEASE "-O3 -DNDEBUG" CACHE STRING "Flags used by the CXX compiler for release builds." FORCE)
-    set(CMAKE_C_FLAGS_DEBUG "-g -O0" CACHE STRING "Flags used by the C compiler for debug builds." FORCE)
-    set(CMAKE_CXX_FLAGS_DEBUG "-g -O0" CACHE STRING "Flags used by the CXX compiler for debug builds." FORCE)
+    set(CMAKE_C_FLAGS_RELEASE "-O3 -DNDEBUG -pg" CACHE STRING "Flags used by the C compiler for release builds." FORCE)
+    set(CMAKE_CXX_FLAGS_RELEASE "-O3 -DNDEBUG -pg" CACHE STRING "Flags used by the CXX compiler for release builds." FORCE)
+    set(CMAKE_C_FLAGS_DEBUG "-g -O0 -pg" CACHE STRING "Flags used by the C compiler for debug builds." FORCE)
+    set(CMAKE_CXX_FLAGS_DEBUG "-g -O0 -pg" CACHE STRING "Flags used by the CXX compiler for debug builds." FORCE)
+    set(CMAKE_EXE_LINKER_FLAGS "-pg" CACHE STRING "Linker flags." FORCE)
 endif()
 
 if(CMAKE_BUILD_TYPE STREQUAL "Debug")
