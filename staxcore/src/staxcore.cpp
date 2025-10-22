@@ -225,8 +225,17 @@ uint64_t StaxTree16::allocate_new_record(ThreadLocalAllocator& local_alloc, cons
     StaxRecord* new_rec = allocator_.get_ptr<StaxRecord>(offset);
     new_rec->key_len = key.length(); new_rec->value_len = value.length(); new_rec->txn_id = ctx.txn_id;
     new_rec->prev_version_offset = prev_version_offset; new_rec->is_deleted = is_delete;
-    memcpy(new_rec->get_key_data(), key.data(), key.length());
-    if(!value.empty()) memcpy(new_rec->get_value_data(), value.data(), value.length());
+
+    // Optimized copy for small, fixed-size keys that are 8-byte aligned.
+    if (key.length() == 8) {
+        *(uint64_t*)(new_rec->get_key_data()) = *(const uint64_t*)(key.data());
+    } else {
+        memcpy(new_rec->get_key_data(), key.data(), key.length());
+    }
+
+    if(!value.empty()) {
+        memcpy(new_rec->get_value_data(), value.data(), value.length());
+    }
     return offset;
 }
 void StaxTree16::remove(ThreadLocalAllocator& local_alloc, const TxnContext &ctx, std::string_view key) {
@@ -324,10 +333,7 @@ public:
                 value->size = 0;
                 return STAX_ERROR_NOT_FOUND;
             }
-            void* val_buf = malloc(record->value_len);
-            if (!val_buf) return STAX_ERROR_OUT_OF_MEMORY;
-            memcpy(val_buf, record->get_value_data(), record->value_len);
-            value->data = val_buf;
+            value->data = record->get_value_data();
             value->size = record->value_len;
         } catch (...) { return STAX_ERROR_GENERIC; }
         return STAX_OK;
@@ -493,8 +499,7 @@ stax_status_t stax_delete(stax_db_t* db, const stax_slice_t* key) {
 }
 
 void stax_free_slice(stax_slice_t* value) {
-    if (value && value->data) {
-        free((void*)value->data);
+    if (value) {
         value->data = nullptr;
         value->size = 0;
     }
