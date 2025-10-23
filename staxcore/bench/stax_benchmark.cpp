@@ -204,6 +204,9 @@ void run_all_lex_benchmarks() {
     run_lex_benchmark(7);
     run_lex_benchmark(8);
     run_lex_benchmark(16);
+    run_lex_benchmark(17);
+    run_lex_benchmark(32);
+    run_lex_benchmark(35);
 
     // Run corresponding unordered_map benchmarks to populate results for comparison table
     run_unordered_map_benchmark(3);
@@ -211,6 +214,9 @@ void run_all_lex_benchmarks() {
     run_unordered_map_benchmark(7);
     run_unordered_map_benchmark(8);
     run_unordered_map_benchmark(16);
+    run_unordered_map_benchmark(17);
+    run_unordered_map_benchmark(32);
+    run_unordered_map_benchmark(35);
 }
 
 // =================================================================================================
