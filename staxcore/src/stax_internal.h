@@ -61,6 +61,15 @@ struct TxnContext {
 #define STAX_ALWAYS_INLINE inline
 #endif
 
+#if defined(__x86_64__) || defined(_M_X64)
+#include <immintrin.h>
+#define STAX_PAUSE() _mm_pause()
+#elif defined(__aarch64__)
+#define STAX_PAUSE() asm volatile("yield")
+#else
+#define STAX_PAUSE()
+#endif
+
 // =================================================================================================
 // --- StaxAllocator (Unified mmap Allocator) ---
 // =================================================================================================

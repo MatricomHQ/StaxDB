@@ -216,7 +216,7 @@ void StaxTree16::insert(ThreadLocalAllocator& local_alloc, const TxnContext &ctx
                 return;
             }
         }
-        _mm_pause();
+        STAX_PAUSE();
     }
 }
 uint64_t StaxTree16::allocate_new_record(ThreadLocalAllocator& local_alloc, const TxnContext &ctx, std::string_view key, std::string_view value, bool is_delete, uint64_t prev_version_offset) {
