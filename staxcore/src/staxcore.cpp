@@ -189,12 +189,21 @@ void StaxTree16::insert(ThreadLocalAllocator& local_alloc, const TxnContext &ctx
                 std::string_view existing_key = existing_record->get_key();
                 int d_idx = find_first_differing_nibble(key, existing_key);
 
-                size_t new_node_size = sizeof(InternalNode) + key.length();
-                uint64_t new_internal_node_offset = local_alloc.allocate(new_node_size, alignof(InternalNode));
+                size_t record_size = sizeof(StaxRecord) + key.length() + value.length();
+                size_t combined_size = sizeof(InternalNode) + record_size;
+                uint64_t combined_offset = local_alloc.allocate(combined_size, alignof(InternalNode));
+                uint64_t new_internal_node_offset = combined_offset;
+                uint64_t new_record_offset = combined_offset + sizeof(InternalNode);
+
                 InternalNode* new_node = new (allocator_.get_ptr<InternalNode>(new_internal_node_offset)) InternalNode(key.length());
                 memcpy(new_node->get_key_data(), key.data(), key.length());
 
-                uint64_t new_record_offset = allocate_new_record(local_alloc, ctx, key, value, is_delete, 0);
+                StaxRecord* new_rec = allocator_.get_ptr<StaxRecord>(new_record_offset);
+                new_rec->key_len = key.length(); new_rec->value_len = value.length(); new_rec->txn_id = ctx.txn_id;
+                new_rec->prev_version_offset = 0; new_rec->is_deleted = is_delete;
+                memcpy(new_rec->get_key_data(), key.data(), key.length());
+                if(!value.empty()) memcpy(new_rec->get_value_data(), value.data(), value.length());
+
                 uint64_t new_leaf_ptr = make_leaf_ptr(new_record_offset);
 
                 int new_key_nibble = get_nibble_at(key, d_idx);

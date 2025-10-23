@@ -139,12 +139,17 @@ struct StaxRecord {
 };
 
 struct InternalNode {
-    uint64_t representative_leaf_offset;
     std::atomic<uint64_t> children[16];
+    uint32_t key_len;
+    uint32_t _padding; // Align to 8 bytes
 
-    InternalNode() : representative_leaf_offset(0) {
+    InternalNode(uint32_t k_len) : key_len(k_len), _padding(0) {
         for(int i=0; i<16; ++i) children[i].store(0, std::memory_order_release);
     }
+
+    char* get_key_data() { return reinterpret_cast<char*>(this) + sizeof(InternalNode); }
+    const char* get_key_data() const { return reinterpret_cast<const char*>(this) + sizeof(InternalNode); }
+    std::string_view get_key() const { return std::string_view(get_key_data(), key_len); }
 };
 
 // =================================================================================================
@@ -355,9 +360,11 @@ inline void StaxTree16::insert(ThreadLocalAllocator& local_alloc, const TxnConte
 
             // Case 2b: Key mismatch. Create a new internal node to split the leaf.
             int d_idx = find_first_differing_nibble(key, existing_key);
-            uint64_t new_internal_node_offset = local_alloc.allocate(sizeof(InternalNode), alignof(InternalNode));
-            InternalNode* new_node = allocator_.get_ptr<InternalNode>(new_internal_node_offset);
-            new (new_node) InternalNode();
+
+            size_t new_node_size = sizeof(InternalNode) + key.length();
+            uint64_t new_internal_node_offset = local_alloc.allocate(new_node_size, alignof(InternalNode));
+            InternalNode* new_node = new (allocator_.get_ptr<InternalNode>(new_internal_node_offset)) InternalNode(key.length());
+            memcpy(new_node->get_key_data(), key.data(), key.length());
 
             uint64_t new_record_offset = allocate_new_record(local_alloc, ctx, key, value, is_delete, 0);
             uint64_t new_leaf_ptr = make_leaf_ptr(new_record_offset);
@@ -367,7 +374,6 @@ inline void StaxTree16::insert(ThreadLocalAllocator& local_alloc, const TxnConte
 
             new_node->children[new_key_nibble].store(new_leaf_ptr, std::memory_order_relaxed);
             new_node->children[existing_key_nibble].store(current_ptr, std::memory_order_relaxed);
-            new_node->representative_leaf_offset = get_offset(new_leaf_ptr);
 
             uint64_t new_internal_ptr = make_internal_ptr(new_internal_node_offset, d_idx);
             if (parent_ptr_loc->compare_exchange_strong(current_ptr, new_internal_ptr, std::memory_order_release, std::memory_order_relaxed)) {
@@ -380,17 +386,17 @@ inline void StaxTree16::insert(ThreadLocalAllocator& local_alloc, const TxnConte
 
         // Case 3: Internal node.
         InternalNode* node = allocator_.get_ptr<InternalNode>(get_offset(current_ptr));
-        StaxRecord* rep_record = allocator_.get_ptr<StaxRecord>(node->representative_leaf_offset);
-        std::string_view rep_key = rep_record->get_key();
+        std::string_view rep_key = node->get_key();
 
         int d_idx = find_first_differing_nibble(key, rep_key);
         uint32_t test_idx = get_test_idx(current_ptr);
 
-        if (d_idx < test_idx) {
+        if (static_cast<uint32_t>(d_idx) < test_idx) {
             // Case 3a: Path diverges. Create a new internal node to split the existing one.
-            uint64_t new_internal_node_offset = local_alloc.allocate(sizeof(InternalNode), alignof(InternalNode));
-            InternalNode* new_node = allocator_.get_ptr<InternalNode>(new_internal_node_offset);
-            new (new_node) InternalNode();
+            size_t new_node_size = sizeof(InternalNode) + key.length();
+            uint64_t new_internal_node_offset = local_alloc.allocate(new_node_size, alignof(InternalNode));
+            InternalNode* new_node = new (allocator_.get_ptr<InternalNode>(new_internal_node_offset)) InternalNode(key.length());
+            memcpy(new_node->get_key_data(), key.data(), key.length());
 
             uint64_t new_record_offset = allocate_new_record(local_alloc, ctx, key, value, is_delete, 0);
             uint64_t new_leaf_ptr = make_leaf_ptr(new_record_offset);
@@ -400,7 +406,6 @@ inline void StaxTree16::insert(ThreadLocalAllocator& local_alloc, const TxnConte
 
             new_node->children[new_key_nibble].store(new_leaf_ptr, std::memory_order_relaxed);
             new_node->children[existing_key_nibble].store(current_ptr, std::memory_order_relaxed);
-            new_node->representative_leaf_offset = get_offset(new_leaf_ptr);
 
             uint64_t new_internal_ptr = make_internal_ptr(new_internal_node_offset, d_idx);
             if (parent_ptr_loc->compare_exchange_strong(current_ptr, new_internal_ptr, std::memory_order_release, std::memory_order_relaxed)) {
