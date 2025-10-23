@@ -52,6 +52,10 @@ public:
         TxnContext ctx = {0, std::numeric_limits<uint64_t>::max(), 1};
         tree_->insert(*st_local_allocator_, ctx, key, value, false);
     }
+    StaxRecord* st_get(std::string_view key) {
+        TxnContext ctx = {0, std::numeric_limits<uint64_t>::max(), 1};
+        return tree_->get(ctx, key, key.length());
+    }
 };
 #else
 class FractalTreeWrapper {
@@ -84,8 +88,130 @@ public:
         TxnContext ctx = {0, std::numeric_limits<uint64_t>::max(), 1};
         tree_->insert(*st_local_allocator_, ctx, key, value, false);
     }
+    StaxRecord* st_get(std::string_view key) {
+        TxnContext ctx = {0, std::numeric_limits<uint64_t>::max(), 1};
+        return tree_->get(ctx, key, key.length());
+    }
 };
 #endif
+
+// =================================================================================================
+// --- LEX BENCHMARKS ---
+// =================================================================================================
+
+std::map<std::string, long long> benchmark_results;
+
+#if defined(__GNUC__) || defined(__clang__)
+#define BSWAP64(x) __builtin_bswap64(x)
+#else
+#define BSWAP64(x) _byteswap_uint64(x)
+#endif
+
+void make_lex_key(uint64_t val, char* key_buf, size_t key_bytes) {
+    uint64_t n = BSWAP64(val);
+    memcpy(key_buf, &n, std::min(sizeof(n), key_bytes));
+    if (key_bytes > sizeof(n)) {
+        memset(key_buf + sizeof(n), 0, key_bytes - sizeof(n));
+    }
+}
+
+void run_lex_benchmark(size_t key_bytes) {
+    constexpr bool is_random = true;
+    constexpr size_t NUM_OPS = 1000000;
+
+    std::string name = "Lexicographical " + std::to_string(key_bytes) + "-byte";
+
+    std::vector<uint64_t> keys(NUM_OPS);
+    for(size_t i=0; i<NUM_OPS; ++i) keys[i] = i;
+    if (is_random) {
+        std::mt19937 g(123);
+        std::shuffle(keys.begin(), keys.end(), g);
+    }
+
+    // --- StaxTree Insert ---
+    FractalTreeWrapper tree;
+    std::vector<char> key_buf(key_bytes);
+    auto start_insert = std::chrono::high_resolution_clock::now();
+    for(size_t i=0; i<NUM_OPS; ++i) {
+        make_lex_key(keys[i], key_buf.data(), key_bytes);
+        tree.st_insert(std::string_view(key_buf.data(), key_bytes), "v");
+    }
+    auto end_insert = std::chrono::high_resolution_clock::now();
+    auto dur_insert = std::chrono::duration_cast<std::chrono::nanoseconds>(end_insert - start_insert);
+    long long ns_per_op_insert = dur_insert.count() / NUM_OPS;
+    std::string bench_name_insert = name + " Insert (Random)";
+    std::cout << std::left << std::setw(45) << bench_name_insert << ": " << std::right << std::setw(10) << ns_per_op_insert << " ns/op" << std::endl;
+    benchmark_results[bench_name_insert] = ns_per_op_insert;
+
+    // --- StaxTree Get ---
+    auto start_get = std::chrono::high_resolution_clock::now();
+    for(size_t i=0; i<NUM_OPS; ++i) {
+        make_lex_key(keys[i], key_buf.data(), key_bytes);
+        tree.st_get(std::string_view(key_buf.data(), key_bytes));
+    }
+    auto end_get = std::chrono::high_resolution_clock::now();
+    auto dur_get = std::chrono::duration_cast<std::chrono::nanoseconds>(end_get - start_get);
+    long long ns_per_op_get = dur_get.count() / NUM_OPS;
+    std::string bench_name_get = name + " Get (Random)";
+    std::cout << std::left << std::setw(45) << bench_name_get << ": " << std::right << std::setw(10) << ns_per_op_get << " ns/op" << std::endl;
+    benchmark_results[bench_name_get] = ns_per_op_get;
+}
+
+void run_unordered_map_benchmark(size_t key_bytes) {
+    constexpr bool is_random = true;
+    constexpr size_t NUM_OPS = 1000000;
+    std::string name = "Unordered_Map " + std::to_string(key_bytes) + "-byte";
+
+    std::unordered_map<std::string, std::string> umap;
+    std::vector<uint64_t> keys(NUM_OPS);
+    for(size_t i=0; i<NUM_OPS; ++i) keys[i] = i;
+    if(is_random) {
+        std::mt19937 g(123);
+        std::shuffle(keys.begin(), keys.end(), g);
+    }
+    std::vector<char> key_buf(key_bytes);
+
+    // --- Unordered Map Insert ---
+    auto start_insert = std::chrono::high_resolution_clock::now();
+    for(size_t i=0; i<NUM_OPS; ++i) {
+        make_lex_key(keys[i], key_buf.data(), key_bytes);
+        umap[std::string(key_buf.data(), key_bytes)] = "v";
+    }
+    auto end_insert = std::chrono::high_resolution_clock::now();
+    auto dur_insert = std::chrono::duration_cast<std::chrono::nanoseconds>(end_insert - start_insert);
+    std::string bench_name_insert = name + " Insert (Random)";
+    long long ns_per_op_insert = dur_insert.count()/NUM_OPS;
+    benchmark_results[bench_name_insert] = ns_per_op_insert;
+
+
+    // --- Unordered Map Get ---
+    auto start_get = std::chrono::high_resolution_clock::now();
+    for(size_t i=0; i<NUM_OPS; ++i) {
+        make_lex_key(keys[i], key_buf.data(), key_bytes);
+        if(umap.find(std::string(key_buf.data(), key_bytes)) == umap.end()) { /* error */ }
+    }
+    auto end_get = std::chrono::high_resolution_clock::now();
+    auto dur_get = std::chrono::duration_cast<std::chrono::nanoseconds>(end_get - start_get);
+    std::string bench_name_get = name + " Get (Random)";
+    long long ns_per_op_get = dur_get.count()/NUM_OPS;
+    benchmark_results[bench_name_get] = ns_per_op_get;
+}
+
+void run_all_lex_benchmarks() {
+    std::cout << "\n--- Performance Benchmarks (ns/op) ---" << std::endl;
+    run_lex_benchmark(3);
+    run_lex_benchmark(4);
+    run_lex_benchmark(7);
+    run_lex_benchmark(8);
+    run_lex_benchmark(16);
+
+    // Run corresponding unordered_map benchmarks to populate results for comparison table
+    run_unordered_map_benchmark(3);
+    run_unordered_map_benchmark(4);
+    run_unordered_map_benchmark(7);
+    run_unordered_map_benchmark(8);
+    run_unordered_map_benchmark(16);
+}
 
 // =================================================================================================
 // --- RIGOROUS RANGE SCAN CORRECTNESS TESTS (NO SORTING) ---
@@ -296,20 +422,53 @@ void run_range_scan_benchmarks();
 
 void run_all_benchmarks() {
     try {
+        run_all_lex_benchmarks();
         run_range_scan_correctness_tests();
         run_range_scan_benchmarks();
         run_in_depth_latency_benchmarks();
     } catch (const std::exception& e) {
         std::cerr << "\n\n*** An error occurred: " << e.what() << " ***" << std::endl;
-        exit(1); // Exit from the thread
+        exit(1);
     }
 }
 
 int main() {
     run_all_benchmarks();
+    std::cout << "\n\n--- Lexicographical vs. Unordered_Map Comparison ---" << std::endl;
+    std::cout << std::string(110, '-') << std::endl;
+    std::cout << std::left << std::setw(45) << "Benchmark"
+              << std::setw(20) << "StaxTree (ns/op)"
+              << std::setw(25) << "Unordered_Map (ns/op)"
+              << std::setw(20) << "Faster By" << std::endl;
+    std::cout << std::string(110, '-') << std::endl;
+
+    for (auto const& [key, stax_time] : benchmark_results) {
+        if (key.find("Lexicographical") != std::string::npos) {
+            std::string umap_key = key;
+            umap_key.replace(0, 15, "Unordered_Map");
+
+            if (benchmark_results.count(umap_key)) {
+                long long umap_time = benchmark_results[umap_key];
+                std::cout << std::left << std::setw(45) << key;
+                std::cout << std::setw(20) << stax_time;
+                std::cout << std::setw(25) << umap_time;
+
+                if (stax_time < umap_time) {
+                    double factor = (double)umap_time / stax_time;
+                    std::cout << "StaxTree by " << std::fixed << std::setprecision(2) << factor << "x" << std::endl;
+                } else {
+                    double factor = (double)stax_time / umap_time;
+                    std::cout << "Unordered_Map by " << std::fixed << std::setprecision(2) << factor << "x" << std::endl;
+                }
+            }
+        }
+    }
+    std::cout << std::string(110, '-') << std::endl;
+
     std::cout << "\nBenchmarks completed." << std::endl;
     return 0;
 }
+
 
 void run_in_depth_latency_benchmarks() {
     std::mt19937_64 rng(1337);
