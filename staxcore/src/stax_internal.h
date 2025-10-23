@@ -166,11 +166,25 @@ struct StaxRecord {
 };
 
 struct InternalNode {
-    uint64_t representative_leaf_offset;
     std::atomic<uint64_t> children[16];
+    uint16_t key_len;
 
-    InternalNode() : representative_leaf_offset(0) {
+    InternalNode() : key_len(0) {
         for(int i=0; i<16; ++i) children[i].store(0, std::memory_order_release);
+    }
+
+    char* get_key_data() {
+        return reinterpret_cast<char*>(this) + sizeof(InternalNode);
+    }
+    const char* get_key_data() const {
+        return reinterpret_cast<const char*>(this) + sizeof(InternalNode);
+    }
+    std::string_view get_key() const {
+        return std::string_view(get_key_data(), key_len);
+    }
+    static size_t get_alloc_size(size_t key_fragment_len) {
+        size_t size = sizeof(InternalNode) + key_fragment_len;
+        return (size + 7) & ~7; // pad to 8 bytes
     }
 };
 
