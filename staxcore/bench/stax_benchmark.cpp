@@ -1,5 +1,9 @@
-#include "stax_internal.h"
+#include "stax_core/stax_new_tree.hpp"
 #include <iostream>
+#include <optional>
+#include <unistd.h>
+#include <fcntl.h>
+#include <sys/mman.h>
 #include <vector>
 #include <string>
 #include <string_view>
@@ -54,7 +58,7 @@ public:
     }
     StaxRecord* st_get(std::string_view key) {
         TxnContext ctx = {0, std::numeric_limits<uint64_t>::max(), 1};
-        return tree_->get(ctx, key, key.length());
+        return tree_->get(ctx, key);
     }
 };
 #else
@@ -73,10 +77,10 @@ public:
         if (mmap_ptr_ == MAP_FAILED) throw std::runtime_error("mmap failed");
         file_header_ = new (mmap_ptr_) FileHeader();
         file_header_->global_alloc_offset.store(sizeof(FileHeader), std::memory_order_relaxed);
-        file_header_->root_ptr.store(0, std::memory_order_relaxed);
+        file_header_->collection_array_offset = 0;
         global_allocator_ = std::make_unique<StaxAllocator>(file_header_, static_cast<uint8_t*>(mmap_ptr_));
         st_local_allocator_ = std::make_unique<ThreadLocalAllocator>(*global_allocator_);
-        tree_ = std::make_unique<StaxTree16>(*global_allocator_, file_header_->root_ptr);
+        tree_ = std::make_unique<StaxTree16>(*global_allocator_, reinterpret_cast<std::atomic<uint64_t>&>(file_header_->collection_array_offset));
     }
     ~FractalTreeWrapper() {
         if (mmap_ptr_ != MAP_FAILED && mmap_ptr_ != nullptr) munmap(mmap_ptr_, mmap_size_);
@@ -90,7 +94,7 @@ public:
     }
     StaxRecord* st_get(std::string_view key) {
         TxnContext ctx = {0, std::numeric_limits<uint64_t>::max(), 1};
-        return tree_->get(ctx, key, key.length());
+        return tree_->get(ctx, key);
     }
 };
 #endif
@@ -355,7 +359,7 @@ void run_latency_test_for_keyset(const std::string& name, const std::vector<std:
         verify_tree_contents(tree.get_tree(), keys);
         start_time = std::chrono::high_resolution_clock::now();
         for (const auto& key : shuffled_keys) {
-            StaxRecord* rec = tree.get_tree()->get(ctx, key, key.length()); do_not_optimize(rec); assert(rec != nullptr);
+            StaxRecord* rec = tree.get_tree()->get(ctx, key); do_not_optimize(rec); assert(rec != nullptr);
         }
         end_time = std::chrono::high_resolution_clock::now();
         total_duration = std::chrono::duration_cast<std::chrono::nanoseconds>(end_time - start_time);
@@ -363,7 +367,7 @@ void run_latency_test_for_keyset(const std::string& name, const std::vector<std:
         std::cout << std::left << std::setw(30) << "Avg. Get (Hit) Latency" << ": " << avg_ns << " ns/op" << std::endl;
         start_time = std::chrono::high_resolution_clock::now();
         for (const auto& key : miss_keys) {
-            StaxRecord* rec = tree.get_tree()->get(ctx, key, key.length()); do_not_optimize(rec); assert(rec == nullptr);
+            StaxRecord* rec = tree.get_tree()->get(ctx, key); do_not_optimize(rec); assert(rec == nullptr);
         }
         end_time = std::chrono::high_resolution_clock::now();
         total_duration = std::chrono::duration_cast<std::chrono::nanoseconds>(end_time - start_time);
