@@ -61,6 +61,15 @@ struct TxnContext {
 #define STAX_ALWAYS_INLINE inline
 #endif
 
+#if defined(__x86_64__) || defined(_M_X64)
+#include <immintrin.h>
+#define STAX_PAUSE() _mm_pause()
+#elif defined(__aarch64__)
+#define STAX_PAUSE() asm volatile("yield")
+#else
+#define STAX_PAUSE()
+#endif
+
 // =================================================================================================
 // --- StaxAllocator (Unified mmap Allocator) ---
 // =================================================================================================
@@ -74,24 +83,17 @@ public:
         : file_header_(file_header), mmap_base_addr_(mmap_base_addr) {}
 
     uint64_t allocate(size_t size, size_t alignment = 8) {
-        if (!file_header_) {
-            throw std::runtime_error("Cannot allocate chunk: file header is null.");
-        }
         if ((alignment & (alignment - 1)) != 0) {
             throw std::invalid_argument("Alignment must be a power of two.");
         }
         const uint64_t alignment_mask = alignment - 1;
-        uint64_t current_offset = file_header_->global_alloc_offset.load(std::memory_order_relaxed);
-        while (true) {
-            uint64_t aligned_offset = (current_offset + alignment_mask) & ~alignment_mask;
-            uint64_t next_offset = aligned_offset + size;
-            if (next_offset > DB_MAX_VIRTUAL_SIZE) {
-                throw std::runtime_error("Database out of space.");
-            }
-            if (file_header_->global_alloc_offset.compare_exchange_weak(current_offset, next_offset, std::memory_order_acq_rel, std::memory_order_relaxed)) {
-                return aligned_offset;
-            }
+        uint64_t current_offset = file_header_->global_alloc_offset.fetch_add(size + alignment, std::memory_order_acq_rel);
+
+        uint64_t aligned_offset = (current_offset + alignment_mask) & ~alignment_mask;
+        if (aligned_offset + size > DB_MAX_VIRTUAL_SIZE) {
+            throw std::runtime_error("Database out of space.");
         }
+        return aligned_offset;
     }
 
     void deallocate(uint64_t /*offset*/, size_t /*size*/) {
@@ -99,9 +101,15 @@ public:
     }
 
     template<typename T>
-    T* get_ptr(uint64_t offset) const {
+    T* get_ptr(uint64_t offset) {
         if (offset == 0) return nullptr;
         return reinterpret_cast<T*>(mmap_base_addr_ + offset);
+    }
+
+    template<typename T>
+    const T* get_ptr(uint64_t offset) const {
+        if (offset == 0) return nullptr;
+        return reinterpret_cast<const T*>(mmap_base_addr_ + offset);
     }
 };
 
@@ -164,12 +172,17 @@ struct StaxRecord {
 };
 
 struct InternalNode {
-    uint64_t representative_leaf_offset;
     std::atomic<uint64_t> children[16];
+    uint32_t key_len;
+    uint32_t _padding; // Align to 8 bytes
 
-    InternalNode() : representative_leaf_offset(0) {
+    InternalNode(uint32_t k_len) : key_len(k_len), _padding(0) {
         for(int i=0; i<16; ++i) children[i].store(0, std::memory_order_release);
     }
+
+    char* get_key_data() { return reinterpret_cast<char*>(this) + sizeof(InternalNode); }
+    const char* get_key_data() const { return reinterpret_cast<const char*>(this) + sizeof(InternalNode); }
+    std::string_view get_key() const { return std::string_view(get_key_data(), key_len); }
 };
 
 // =================================================================================================
@@ -207,5 +220,14 @@ private:
     STAX_ALWAYS_INLINE int get_nibble_from_child_idx(int child_idx, uint32_t test_idx) const;
     uint64_t allocate_new_record(ThreadLocalAllocator& local_alloc, const TxnContext &ctx, std::string_view key, std::string_view value, bool is_delete, uint64_t prev_version_offset);
     static int find_first_differing_nibble(std::string_view k1, std::string_view k2);
-    StaxRecord* get_visible_record(StaxRecord* record_head, const TxnContext& ctx) const;
+    STAX_ALWAYS_INLINE StaxRecord* get_visible_record(StaxRecord* record_head, const TxnContext& ctx) const {
+        StaxRecord* current_rec = record_head;
+        while (current_rec != nullptr) {
+            if (current_rec->txn_id <= ctx.read_snapshot_id) {
+                return current_rec->is_deleted ? nullptr : current_rec;
+            }
+            current_rec = allocator_.get_ptr<StaxRecord>(current_rec->prev_version_offset);
+        }
+        return nullptr;
+    }
 };

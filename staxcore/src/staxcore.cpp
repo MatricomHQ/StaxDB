@@ -27,16 +27,6 @@ STAX_ALWAYS_INLINE uint64_t StaxTree16::make_internal_ptr(uint64_t offset, uint3
 STAX_ALWAYS_INLINE int StaxTree16::get_child_idx(int nibble, uint32_t test_idx) const { return nibble ^ (test_idx & 0x0F); }
 STAX_ALWAYS_INLINE int StaxTree16::get_nibble_from_child_idx(int child_idx, uint32_t test_idx) const { return child_idx ^ (test_idx & 0x0F); }
 StaxTree16::StaxTree16(StaxAllocator &allocator, std::atomic<uint64_t> &root_ref) : allocator_(allocator), root_ptr_(root_ref) {}
-StaxRecord* StaxTree16::get_visible_record(StaxRecord* record_head, const TxnContext& ctx) const {
-    StaxRecord* current_rec = record_head;
-    while (current_rec != nullptr) {
-        if (current_rec->txn_id <= ctx.read_snapshot_id) {
-            return current_rec->is_deleted ? nullptr : current_rec;
-        }
-        current_rec = allocator_.get_ptr<StaxRecord>(current_rec->prev_version_offset);
-    }
-    return nullptr;
-}
 STAX_ALWAYS_INLINE int StaxTree16::get_nibble_at(std::string_view key, uint32_t nibble_idx) {
     const size_t byte_idx = nibble_idx >> 1;
     const bool is_in_bounds = byte_idx < key.length();
@@ -136,7 +126,7 @@ void StaxTree16::range_scan(const TxnContext& ctx, std::string_view start_key, s
             }
             continue;
         }
-        InternalNode* node = allocator_.get_ptr<InternalNode>(get_internal_offset(frame.node_ptr));
+        const InternalNode* node = allocator_.get_ptr<const InternalNode>(get_internal_offset(frame.node_ptr));
         uint32_t test_idx = get_test_idx(frame.node_ptr);
         int start_nibble = frame.lower_bound_tight ? get_nibble_at(start_key, test_idx) : 0;
         int end_nibble = frame.upper_bound_tight ? get_nibble_at(end_key, test_idx) : 15;
@@ -157,36 +147,52 @@ void StaxTree16::insert(ThreadLocalAllocator& local_alloc, const TxnContext &ctx
         std::atomic<uint64_t>* parent_ptr_loc = &root_ptr_;
         uint64_t current_ptr = root_ptr_.load(std::memory_order_acquire);
 
-        while (true) {
-            if (current_ptr == 0) {
-                uint64_t new_record_offset = allocate_new_record(local_alloc, ctx, key, value, is_delete, 0);
-                uint64_t new_leaf_ptr = make_leaf_ptr(new_record_offset);
-                uint64_t expected = 0;
-                if (parent_ptr_loc->compare_exchange_strong(expected, new_leaf_ptr, std::memory_order_release, std::memory_order_relaxed)) {
-                    return;
-                }
-                break; // Restart from root
+        while (current_ptr != 0 && !is_leaf(current_ptr)) {
+            InternalNode* node = allocator_.get_ptr<InternalNode>(get_internal_offset(current_ptr));
+            uint32_t test_idx = get_test_idx(current_ptr);
+
+            std::string_view rep_key = node->get_key();
+            int d_idx = find_first_differing_nibble(key, rep_key);
+
+            if (d_idx == -1) { // Keys are identical up to min length
+                 // This case should ideally lead to a leaf, if not, it's an issue.
+                 // For now, we assume the logic continues to find a leaf.
+            } else if (static_cast<uint32_t>(d_idx) < test_idx) {
+                // The keys differ at a nibble before the current node's test index.
+                // This means we need to split the tree here.
+                break;
             }
 
-            if (is_leaf(current_ptr)) {
-                uint64_t leaf_offset = get_leaf_offset(current_ptr);
-                StaxRecord* existing_record = allocator_.get_ptr<StaxRecord>(leaf_offset);
+            int nibble = get_nibble_at(key, test_idx);
+            parent_ptr_loc = &node->children[get_child_idx(nibble, test_idx)];
+            current_ptr = parent_ptr_loc->load(std::memory_order_acquire);
+        }
 
-                if (existing_record->key_len == key.length() && existing_record->get_key() == key) {
-                    uint64_t new_record_offset = allocate_new_record(local_alloc, ctx, key, value, is_delete, leaf_offset);
-                    uint64_t new_leaf_ptr = make_leaf_ptr(new_record_offset);
-                    if (parent_ptr_loc->compare_exchange_strong(current_ptr, new_leaf_ptr, std::memory_order_release, std::memory_order_relaxed)) {
-                        return;
-                    }
-                    break; // Restart from root
+        uint64_t expected_ptr = current_ptr;
+
+        if (current_ptr == 0) {
+            uint64_t new_record_offset = allocate_new_record(local_alloc, ctx, key, value, is_delete, 0);
+            uint64_t new_leaf_ptr = make_leaf_ptr(new_record_offset);
+            if (parent_ptr_loc->compare_exchange_strong(expected_ptr, new_leaf_ptr, std::memory_order_release, std::memory_order_relaxed)) {
+                return;
+            }
+        } else if (is_leaf(current_ptr)) {
+            uint64_t leaf_offset = get_leaf_offset(current_ptr);
+            StaxRecord* existing_record = allocator_.get_ptr<StaxRecord>(leaf_offset);
+            if (existing_record->get_key() == key) {
+                uint64_t new_record_offset = allocate_new_record(local_alloc, ctx, key, value, is_delete, leaf_offset);
+                uint64_t new_leaf_ptr = make_leaf_ptr(new_record_offset);
+                if (parent_ptr_loc->compare_exchange_strong(expected_ptr, new_leaf_ptr, std::memory_order_release, std::memory_order_relaxed)) {
+                    return;
                 }
-
+            } else {
                 std::string_view existing_key = existing_record->get_key();
                 int d_idx = find_first_differing_nibble(key, existing_key);
 
-                uint64_t new_internal_node_offset = local_alloc.allocate(sizeof(InternalNode), alignof(InternalNode));
-                InternalNode* new_node = allocator_.get_ptr<InternalNode>(new_internal_node_offset);
-                new (new_node) InternalNode();
+                size_t new_node_size = sizeof(InternalNode) + key.length();
+                uint64_t new_internal_node_offset = local_alloc.allocate(new_node_size, alignof(InternalNode));
+                InternalNode* new_node = new (allocator_.get_ptr<InternalNode>(new_internal_node_offset)) InternalNode(key.length());
+                memcpy(new_node->get_key_data(), key.data(), key.length());
 
                 uint64_t new_record_offset = allocate_new_record(local_alloc, ctx, key, value, is_delete, 0);
                 uint64_t new_leaf_ptr = make_leaf_ptr(new_record_offset);
@@ -196,48 +202,37 @@ void StaxTree16::insert(ThreadLocalAllocator& local_alloc, const TxnContext &ctx
 
                 new_node->children[get_child_idx(new_key_nibble, d_idx)].store(new_leaf_ptr, std::memory_order_relaxed);
                 new_node->children[get_child_idx(existing_key_nibble, d_idx)].store(current_ptr, std::memory_order_relaxed);
-                new_node->representative_leaf_offset = get_leaf_offset(new_leaf_ptr);
 
                 uint64_t new_internal_ptr = make_internal_ptr(new_internal_node_offset, d_idx);
-                if (parent_ptr_loc->compare_exchange_strong(current_ptr, new_internal_ptr, std::memory_order_release, std::memory_order_relaxed)) {
+                if (parent_ptr_loc->compare_exchange_strong(expected_ptr, new_internal_ptr, std::memory_order_release, std::memory_order_relaxed)) {
                     return;
                 }
-                break; // Restart from root
             }
-
+        } else { // split internal node
             InternalNode* node = allocator_.get_ptr<InternalNode>(get_internal_offset(current_ptr));
-            StaxRecord* rep_record = allocator_.get_ptr<StaxRecord>(node->representative_leaf_offset);
-            std::string_view rep_key = rep_record->get_key();
-
+            std::string_view rep_key = node->get_key();
             int d_idx = find_first_differing_nibble(key, rep_key);
-            uint32_t test_idx = get_test_idx(current_ptr);
 
-            if (d_idx != -1 && static_cast<uint32_t>(d_idx) < test_idx) {
-                uint64_t new_internal_node_offset = local_alloc.allocate(sizeof(InternalNode), alignof(InternalNode));
-                InternalNode* new_node = allocator_.get_ptr<InternalNode>(new_internal_node_offset);
-                new (new_node) InternalNode();
+            size_t new_node_size = sizeof(InternalNode) + key.length();
+            uint64_t new_internal_node_offset = local_alloc.allocate(new_node_size, alignof(InternalNode));
+            InternalNode* new_node = new (allocator_.get_ptr<InternalNode>(new_internal_node_offset)) InternalNode(key.length());
+            memcpy(new_node->get_key_data(), key.data(), key.length());
 
-                uint64_t new_record_offset = allocate_new_record(local_alloc, ctx, key, value, is_delete, 0);
-                uint64_t new_leaf_ptr = make_leaf_ptr(new_record_offset);
+            uint64_t new_record_offset = allocate_new_record(local_alloc, ctx, key, value, is_delete, 0);
+            uint64_t new_leaf_ptr = make_leaf_ptr(new_record_offset);
 
-                int new_key_nibble = get_nibble_at(key, d_idx);
-                int existing_key_nibble = get_nibble_at(rep_key, d_idx);
+            int new_key_nibble = get_nibble_at(key, d_idx);
+            int existing_key_nibble = get_nibble_at(rep_key, d_idx);
 
-                new_node->children[get_child_idx(new_key_nibble, d_idx)].store(new_leaf_ptr, std::memory_order_relaxed);
-                new_node->children[get_child_idx(existing_key_nibble, d_idx)].store(current_ptr, std::memory_order_relaxed);
-                new_node->representative_leaf_offset = get_leaf_offset(new_leaf_ptr);
+            new_node->children[get_child_idx(new_key_nibble, d_idx)].store(new_leaf_ptr, std::memory_order_relaxed);
+            new_node->children[get_child_idx(existing_key_nibble, d_idx)].store(current_ptr, std::memory_order_relaxed);
 
-                uint64_t new_internal_ptr = make_internal_ptr(new_internal_node_offset, d_idx);
-                if (parent_ptr_loc->compare_exchange_strong(current_ptr, new_internal_ptr, std::memory_order_release, std::memory_order_relaxed)) {
-                    return;
-                }
-                break; // Restart from root
+            uint64_t new_internal_ptr = make_internal_ptr(new_internal_node_offset, d_idx);
+            if (parent_ptr_loc->compare_exchange_strong(expected_ptr, new_internal_ptr, std::memory_order_release, std::memory_order_relaxed)) {
+                return;
             }
-
-            int nibble = get_nibble_at(key, test_idx);
-            parent_ptr_loc = &node->children[get_child_idx(nibble, test_idx)];
-            current_ptr = parent_ptr_loc->load(std::memory_order_acquire);
         }
+        STAX_PAUSE();
     }
 }
 uint64_t StaxTree16::allocate_new_record(ThreadLocalAllocator& local_alloc, const TxnContext &ctx, std::string_view key, std::string_view value, bool is_delete, uint64_t prev_version_offset) {
@@ -258,12 +253,14 @@ StaxRecord* StaxTree16::get(const TxnContext &ctx, std::string_view key, size_t 
     while (current_ptr != 0) {
         if (is_leaf(current_ptr)) {
             StaxRecord* record_head = allocator_.get_ptr<StaxRecord>(get_leaf_offset(current_ptr));
-            if (record_head->key_len == key_len) return get_visible_record(record_head, ctx);
+            if (record_head->get_key() == key) {
+                return get_visible_record(record_head, ctx);
+            }
             return nullptr;
         } else {
             uint32_t test_idx = get_test_idx(current_ptr);
             int nibble = get_nibble_at(key, test_idx);
-            InternalNode* node = allocator_.get_ptr<InternalNode>(get_internal_offset(current_ptr));
+            const InternalNode* node = allocator_.get_ptr<const InternalNode>(get_internal_offset(current_ptr));
             current_ptr = node->children[get_child_idx(nibble, test_idx)].load(std::memory_order_acquire);
         }
     }
@@ -345,7 +342,10 @@ public:
                 value->size = 0;
                 return STAX_ERROR_NOT_FOUND;
             }
-            value->data = record->get_value_data();
+            void* val_buf = malloc(record->value_len);
+            if (!val_buf) return STAX_ERROR_OUT_OF_MEMORY;
+            memcpy(val_buf, record->get_value_data(), record->value_len);
+            value->data = val_buf;
             value->size = record->value_len;
         } catch (...) { return STAX_ERROR_GENERIC; }
         return STAX_OK;
