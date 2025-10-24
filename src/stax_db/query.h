@@ -14,12 +14,14 @@
 
 class FlexDoc {
 public:
-    FlexDoc(DataView raw_data); 
+    FlexDoc(DataView raw_data, std::string_view primary_key);
     std::optional<std::string_view> get_field(std::string_view field_name) const;
+    std::string_view get_primary_key() const { return primary_key_; }
     bool is_valid() const { return data_.data != nullptr && data_.len > 0; }
 
 private:
     DataView data_;
+    std::string_view primary_key_;
 };
 
 enum class QueryOp {
@@ -48,6 +50,7 @@ public:
     QueryBuilder& where(std::string_view attribute, QueryOp op, uint64_t value);
     QueryBuilder& where(std::string_view attribute, QueryOp op, uint64_t val1, uint64_t val2); 
     QueryBuilder& where_string(std::string_view attribute, QueryOp op, std::string_view value);
+    QueryBuilder& where_string(std::string_view attribute, QueryOp op, std::string_view val1, std::string_view val2);
 
     QueryBuilder& limit(size_t max_results);
     QueryBuilder& select(std::initializer_list<std::string_view> fields);
