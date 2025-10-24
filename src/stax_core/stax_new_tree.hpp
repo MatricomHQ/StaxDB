@@ -12,6 +12,8 @@
 #include "stax_common/constants.h"
 #include "stax_tx/transaction.h"
 #include "stax_db/arena_structs.h"
+#include "dimensional.hpp"
+#include <queue>
 
 #if defined(__x86_64__) || defined(__i386__)
 #include <immintrin.h>
@@ -122,36 +124,7 @@ public:
 };
 
 
-// =================================================================================================
-// --- Node and Record Structures ---
-// =================================================================================================
-struct StaxRecord {
-    uint32_t key_len;
-    uint32_t value_len;
-    TxnID txn_id;
-    uint64_t prev_version_offset;
-    bool is_deleted;
-
-    char* get_key_data() { return reinterpret_cast<char*>(this) + sizeof(StaxRecord); }
-    const char* get_key_data() const { return reinterpret_cast<const char*>(this) + sizeof(StaxRecord); }
-    char* get_value_data() { return reinterpret_cast<char*>(this) + sizeof(StaxRecord) + key_len; }
-    const char* get_value_data() const { return reinterpret_cast<const char*>(this) + sizeof(StaxRecord) + key_len; }
-    std::string_view get_key() const { return std::string_view(get_key_data(), key_len); }
-};
-
-struct InternalNode {
-    std::atomic<uint64_t> children[16];
-    uint32_t key_len;
-    uint32_t _padding; // Align to 8 bytes
-
-    InternalNode(uint32_t k_len) : key_len(k_len), _padding(0) {
-        for(int i=0; i<16; ++i) children[i].store(0, std::memory_order_release);
-    }
-
-    char* get_key_data() { return reinterpret_cast<char*>(this) + sizeof(InternalNode); }
-    const char* get_key_data() const { return reinterpret_cast<const char*>(this) + sizeof(InternalNode); }
-    std::string_view get_key() const { return std::string_view(get_key_data(), key_len); }
-};
+#include "stax_structs.hpp"
 
 // =================================================================================================
 // --- Utility Functions ---
@@ -194,14 +167,33 @@ inline uint64_t big_endian_str_to_uint64(std::string_view s) {
 class StaxTree16
 {
 private:
-    StaxAllocator &allocator_; // Still needed for get_ptr
+    StaxAllocator &allocator_;
     std::atomic<uint64_t> &root_ptr_;
+    uint32_t D_; // Dimensionality of the keys. D=0 for non-dimensional trees.
 
 public:
-    StaxTree16(StaxAllocator &allocator,
-             std::atomic<uint64_t> &root_ref)
+    StaxTree16(StaxAllocator &allocator, std::atomic<uint64_t> &root_ref, uint32_t D = 0)
     : allocator_(allocator),
-      root_ptr_(root_ref) {}
+      root_ptr_(root_ref),
+      D_(D) {}
+
+    // Dimensionality accessor
+    uint32_t get_dimensionality() const { return D_; }
+
+    std::optional<StaxPath> find_path_for_seek(std::string_view key, bool find_first_on_mismatch) const;
+
+    // Cursor factory method
+    std::unique_ptr<StaxCursor<StaxTree16>> create_cursor(
+        std::string_view start_key,
+        std::string_view end_key,
+        bool track_aabb) const {
+        return std::make_unique<StaxCursor<StaxTree16>>(this, start_key, end_key, track_aabb);
+    }
+
+    // Dimensional query methods
+    std::vector<void*> query_box(const AABB& query_box) const;
+    std::vector<void*> query_sphere(const uint64_t* center, long double radius) const;
+    std::vector<void*> query_knn(const uint64_t* query_point, int k) const;
 
     void insert(ThreadLocalAllocator& local_alloc, const TxnContext &ctx, std::string_view key, std::string_view value, bool is_delete = false);
     void range_scan(const TxnContext &ctx, std::string_view start_key, std::string_view end_key, std::vector<StaxRecord*>& results) const;
@@ -334,8 +326,211 @@ public:
     }
 
     StaxAllocator& get_allocator() { return allocator_; }
+    const StaxAllocator& get_allocator() const { return allocator_; }
     std::atomic<uint64_t>& get_root_ptr() { return root_ptr_; }
+    const std::atomic<uint64_t>& get_root_ptr() const { return root_ptr_; }
 };
+
+inline std::optional<StaxPath> StaxTree16::find_path_for_seek(std::string_view key, bool find_first_on_mismatch) const {
+    StaxPath path;
+    uint64_t current_ptr = root_ptr_.load(std::memory_order_acquire);
+    int last_nibble = -1;
+
+    while (current_ptr != 0 && !is_leaf(current_ptr)) {
+        path.frames.push_back({current_ptr, last_nibble});
+        InternalNode* node = allocator_.get_ptr<InternalNode>(get_offset(current_ptr));
+        uint32_t test_idx = get_test_idx(current_ptr);
+        int nibble = get_nibble_at(key, test_idx);
+        last_nibble = nibble;
+        current_ptr = node->children[nibble].load(std::memory_order_acquire);
+    }
+
+    if (current_ptr != 0) { // is_leaf
+        StaxRecord* record = allocator_.get_ptr<StaxRecord>(get_offset(current_ptr));
+        if (record->get_key() >= key) {
+            path.leaf_handle = current_ptr;
+            return path;
+        }
+    }
+
+    if (find_first_on_mismatch) {
+        // The key wasn't found. We need to backtrack up the path to find the
+        // next lexicographical leaf.
+        while (!path.frames.empty()) {
+            StaxPath::Frame last_frame = path.frames.back();
+            path.frames.pop_back();
+
+            InternalNode* parent_node = allocator_.get_ptr<InternalNode>(get_offset(last_frame.node_ptr));
+
+            // Scan siblings in the parent node for the next valid branch.
+            for (int nibble = last_frame.nibble_in_parent + 1; nibble < 16; ++nibble) {
+                uint64_t child_ptr = parent_node->children[nibble].load(std::memory_order_acquire);
+                if (child_ptr != 0) {
+                    // Found the next branch. Now, do a left-most descent to find its first leaf.
+                    path.frames.push_back({last_frame.node_ptr, nibble});
+                    current_ptr = child_ptr;
+                    while (!is_leaf(current_ptr)) {
+                        InternalNode* node = allocator_.get_ptr<InternalNode>(get_offset(current_ptr));
+                        // Find the first valid child (0-15) and descend.
+                        bool found_child = false;
+                        for (int i = 0; i < 16; ++i) {
+                            uint64_t next_ptr = node->children[i].load(std::memory_order_acquire);
+                            if (next_ptr != 0) {
+                                path.frames.push_back({current_ptr, i});
+                                current_ptr = next_ptr;
+                                found_child = true;
+                                break;
+                            }
+                        }
+                        if (!found_child) {
+                             // Should not happen in a well-formed tree
+                             return std::nullopt;
+                        }
+                    }
+                    path.leaf_handle = current_ptr;
+                    return path;
+                }
+            }
+        }
+    }
+
+    return std::nullopt; // No next key found
+}
+
+#include "dimensional.inl"
+
+inline std::vector<void*> StaxTree16::query_box(const AABB& query_box) const {
+    std::vector<void*> results;
+    auto cursor = create_cursor("", "\xFF", true); // Max range
+    cursor->seek_first();
+
+    while (cursor->is_valid()) {
+        const AABB* current_aabb = cursor->get_current_aabb();
+        if (aabbs_intersect(*current_aabb, query_box)) {
+            StaxRecord* record = allocator_.get_ptr<StaxRecord>(get_offset(reinterpret_cast<uint64_t>(cursor->get_record_handle())));
+            std::vector<uint64_t> coords(D_);
+            SpatialKeywords::get_coords_from_apk(record->get_key(), coords.data(), D_);
+            bool in_box = true;
+            for(uint32_t i=0; i < D_; ++i) {
+                if (coords[i] < query_box.min_bounds[i] || coords[i] > query_box.max_bounds[i]) {
+                    in_box = false;
+                    break;
+                }
+            }
+            if (in_box) {
+                results.push_back(cursor->get_record_handle());
+            }
+            cursor->move_next();
+        } else {
+            cursor->skip_current_branch(query_box);
+        }
+    }
+    return results;
+}
+
+inline std::vector<void*> StaxTree16::query_sphere(const uint64_t* center, long double radius) const {
+    // 1. Create a bounding box from the sphere.
+    AABB sphere_box(D_);
+    for (uint32_t i = 0; i < D_; ++i) {
+        sphere_box.min_bounds[i] = (center[i] > radius) ? center[i] - static_cast<uint64_t>(radius) : 0;
+        sphere_box.max_bounds[i] = (center[i] < UINT64_MAX - radius) ? center[i] + static_cast<uint64_t>(radius) : UINT64_MAX;
+    }
+
+    // 2. Use query_box to get candidate points.
+    std::vector<void*> candidates = query_box(sphere_box);
+    std::vector<void*> results;
+    long double radius_sq = radius * radius;
+
+    // 3. Final filtering.
+    for (void* handle : candidates) {
+        StaxRecord* record = allocator_.get_ptr<StaxRecord>(get_offset(reinterpret_cast<uint64_t>(handle)));
+        std::vector<uint64_t> coords(D_);
+        SpatialKeywords::get_coords_from_apk(record->get_key(), coords.data(), D_);
+        if (SpatialKeywords::PointDistSq(coords.data(), center, D_) <= radius_sq) {
+            results.push_back(handle);
+        }
+    }
+
+    return results;
+}
+
+inline std::vector<void*> StaxTree16::query_knn(const uint64_t* query_point, int k) const {
+    if (k <= 0) return {};
+
+    std::string center_key = SpatialKeywords::generate_apk(query_point, D_);
+
+    // Priority queue to store the k nearest neighbors found so far.
+    // The pair stores <distance_sq, handle>. The queue is a max-heap, so the furthest of the k nearest is always at the top.
+    using ResultPair = std::pair<long double, void*>;
+    std::priority_queue<ResultPair> best_results;
+
+    auto forward_cursor = create_cursor(center_key, "\xFF", true);
+    auto backward_cursor = create_cursor("", center_key, true);
+
+    forward_cursor->seek_first();
+    backward_cursor->seek_last(); // Note: seek_last is not fully implemented yet, but this is the structure.
+
+    bool forward_pruned = false;
+    bool backward_pruned = false;
+
+    while ((forward_cursor->is_valid() && !forward_pruned) || (backward_cursor->is_valid() && !backward_pruned)) {
+
+        long double current_max_dist_sq = (best_results.size() == static_cast<size_t>(k)) ? best_results.top().first : -1.0L;
+
+        // --- Process Forward Cursor ---
+        if (forward_cursor->is_valid() && !forward_pruned) {
+            const AABB* box = forward_cursor->get_current_aabb();
+            if (current_max_dist_sq >= 0 && SpatialKeywords::distance_to_box_sq(query_point, *box, D_) > current_max_dist_sq) {
+                forward_pruned = true;
+            } else {
+                void* handle = forward_cursor->get_record_handle();
+                StaxRecord* record = allocator_.get_ptr<StaxRecord>(get_offset(reinterpret_cast<uint64_t>(handle)));
+                std::vector<uint64_t> coords(D_);
+                SpatialKeywords::get_coords_from_apk(record->get_key(), coords.data(), D_);
+                long double dist_sq = SpatialKeywords::PointDistSq(coords.data(), query_point, D_);
+
+                if (best_results.size() < static_cast<size_t>(k)) {
+                    best_results.push({dist_sq, handle});
+                } else if (dist_sq < best_results.top().first) {
+                    best_results.pop();
+                    best_results.push({dist_sq, handle});
+                }
+                forward_cursor->move_next();
+            }
+        }
+
+        // --- Process Backward Cursor ---
+        if (backward_cursor->is_valid() && !backward_pruned) {
+             const AABB* box = backward_cursor->get_current_aabb();
+             if (current_max_dist_sq >= 0 && SpatialKeywords::distance_to_box_sq(query_point, *box, D_) > current_max_dist_sq) {
+                backward_pruned = true;
+            } else {
+                void* handle = backward_cursor->get_record_handle();
+                StaxRecord* record = allocator_.get_ptr<StaxRecord>(get_offset(reinterpret_cast<uint64_t>(handle)));
+                std::vector<uint64_t> coords(D_);
+                SpatialKeywords::get_coords_from_apk(record->get_key(), coords.data(), D_);
+                long double dist_sq = SpatialKeywords::PointDistSq(coords.data(), query_point, D_);
+                if (best_results.size() < static_cast<size_t>(k)) {
+                    best_results.push({dist_sq, handle});
+                } else if (dist_sq < best_results.top().first) {
+                    best_results.pop();
+                    best_results.push({dist_sq, handle});
+                }
+                backward_cursor->move_prev();
+            }
+        }
+        if(forward_pruned && backward_pruned) break;
+    }
+
+    std::vector<void*> results;
+    while(!best_results.empty()) {
+        results.push_back(best_results.top().second);
+        best_results.pop();
+    }
+    std::reverse(results.begin(), results.end());
+    return results;
+}
+
 
 inline void StaxTree16::insert(ThreadLocalAllocator& local_alloc, const TxnContext &ctx, std::string_view key, std::string_view value, bool is_delete) {
     while (true) {
