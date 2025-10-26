@@ -472,7 +472,8 @@ inline std::vector<void*> StaxTree16::query_knn(const uint64_t* query_point, int
     std::string center_key = SpatialKeywords::generate_apk(query_point, D_);
 
     using ResultPair = std::pair<long double, void*>;
-    std::priority_queue<ResultPair> best_results;
+    auto compare = [](const ResultPair& a, const ResultPair& b) { return a.first < b.first; };
+    std::priority_queue<ResultPair, std::vector<ResultPair>, decltype(compare)> best_results(compare);
 
     auto forward_cursor = create_cursor(center_key, "\xFF", true);
     auto backward_cursor = create_cursor("", center_key, true);
@@ -561,15 +562,16 @@ inline void StaxTree16::insert(ThreadLocalAllocator& local_alloc, const TxnConte
         std::atomic<uint64_t>* parent_ptr_loc = &root_ptr_;
         uint64_t current_ptr = root_ptr_.load(std::memory_order_acquire);
 
+        // --- 1. Traverse the tree to find insertion point ---
         while (current_ptr != 0 && !is_leaf(current_ptr)) {
             InternalNode* node = allocator_.get_ptr<InternalNode>(get_offset(current_ptr));
             uint32_t test_idx = get_test_idx(current_ptr);
-
             std::string_view rep_key = node->get_key();
-            int d_idx = find_first_differing_nibble(key, rep_key);
 
-            if (d_idx != -1 && static_cast<uint32_t>(d_idx) < test_idx) {
-                // Path diverges before this node. Split is needed above.
+            // Check if the key diverges from this node's prefix before the test nibble.
+            int d_idx = find_first_differing_nibble(key, rep_key);
+            if (d_idx != -1 && (uint32_t)d_idx < test_idx) {
+                // Path diverges before this node. Split is needed above this node.
                 break;
             }
 
@@ -580,29 +582,39 @@ inline void StaxTree16::insert(ThreadLocalAllocator& local_alloc, const TxnConte
 
         uint64_t expected_ptr = current_ptr;
 
-        if (current_ptr == 0) {
+        // --- 2. Handle insertion based on what was found ---
+        if (current_ptr == 0) { // Case A: Found an empty child pointer
             uint64_t new_record_offset = allocate_new_record(local_alloc, ctx, key, value, is_delete, 0);
             uint64_t new_leaf_ptr = make_leaf_ptr(new_record_offset);
             if (parent_ptr_loc->compare_exchange_strong(expected_ptr, new_leaf_ptr, std::memory_order_release, std::memory_order_relaxed)) {
                 return;
             }
-        } else if (is_leaf(current_ptr)) {
+        } else if (is_leaf(current_ptr)) { // Case B: Found a leaf node
             uint64_t leaf_offset = get_offset(current_ptr);
             StaxRecord* existing_record = allocator_.get_ptr<StaxRecord>(leaf_offset);
-            if (existing_record->get_key() == key) {
+            if (existing_record->get_key() == key) { // B.1: Keys match, create new version
                 uint64_t new_record_offset = allocate_new_record(local_alloc, ctx, key, value, is_delete, leaf_offset);
                 uint64_t new_leaf_ptr = make_leaf_ptr(new_record_offset);
                 if (parent_ptr_loc->compare_exchange_strong(expected_ptr, new_leaf_ptr, std::memory_order_release, std::memory_order_relaxed)) {
                     return;
                 }
-            } else {
+            } else { // B.2: Keys differ, split is required
                 std::string_view existing_key = existing_record->get_key();
                 int d_idx = find_first_differing_nibble(key, existing_key);
 
-                size_t new_node_size = sizeof(InternalNode) + key.length();
+                if (d_idx == -1) { // Should be caught by key equality check
+                    uint64_t new_record_offset = allocate_new_record(local_alloc, ctx, key, value, is_delete, leaf_offset);
+                    uint64_t new_leaf_ptr = make_leaf_ptr(new_record_offset);
+                    if (parent_ptr_loc->compare_exchange_strong(expected_ptr, new_leaf_ptr, std::memory_order_release, std::memory_order_relaxed)) return;
+                    else continue;
+                }
+
+                // Create a new internal node representing the common prefix
+                std::string_view rep_key = key.substr(0, d_idx / 2);
+                size_t new_node_size = sizeof(InternalNode) + rep_key.length();
                 uint64_t new_internal_node_offset = local_alloc.allocate(new_node_size, alignof(InternalNode));
-                InternalNode* new_node = new (allocator_.get_ptr<InternalNode>(new_internal_node_offset)) InternalNode(key.length());
-                memcpy(new_node->get_key_data(), key.data(), key.length());
+                InternalNode* new_node = new (allocator_.get_ptr<InternalNode>(new_internal_node_offset)) InternalNode(rep_key.length());
+                memcpy(new_node->get_key_data(), rep_key.data(), rep_key.length());
 
                 uint64_t new_record_offset = allocate_new_record(local_alloc, ctx, key, value, is_delete, 0);
                 uint64_t new_leaf_ptr = make_leaf_ptr(new_record_offset);
@@ -618,15 +630,16 @@ inline void StaxTree16::insert(ThreadLocalAllocator& local_alloc, const TxnConte
                     return;
                 }
             }
-        } else { // Split internal node
+        } else { // Case C: Path diverged, need to split an existing internal node
             InternalNode* node = allocator_.get_ptr<InternalNode>(get_offset(current_ptr));
             std::string_view rep_key = node->get_key();
             int d_idx = find_first_differing_nibble(key, rep_key);
 
-            size_t new_node_size = sizeof(InternalNode) + key.length();
+            std::string_view new_rep_key = key.substr(0, d_idx / 2);
+            size_t new_node_size = sizeof(InternalNode) + new_rep_key.length();
             uint64_t new_internal_node_offset = local_alloc.allocate(new_node_size, alignof(InternalNode));
-            InternalNode* new_node = new (allocator_.get_ptr<InternalNode>(new_internal_node_offset)) InternalNode(key.length());
-            memcpy(new_node->get_key_data(), key.data(), key.length());
+            InternalNode* new_node = new (allocator_.get_ptr<InternalNode>(new_internal_node_offset)) InternalNode(new_rep_key.length());
+            memcpy(new_node->get_key_data(), new_rep_key.data(), new_rep_key.length());
 
             uint64_t new_record_offset = allocate_new_record(local_alloc, ctx, key, value, is_delete, 0);
             uint64_t new_leaf_ptr = make_leaf_ptr(new_record_offset);
@@ -722,9 +735,18 @@ inline StaxRecord* StaxTree16::get(const TxnContext &ctx, std::string_view key) 
             }
             return nullptr;
         } else {
-            uint32_t test_idx = get_test_idx(current_ptr);
-            int nibble = get_nibble_at(key, test_idx);
             InternalNode* node = allocator_.get_ptr<InternalNode>(get_offset(current_ptr));
+            uint32_t test_idx = get_test_idx(current_ptr);
+            std::string_view rep_key = node->get_key();
+
+            // This check is crucial for correctness in a PATRICIA trie.
+            // We ensure the key matches the path we are on.
+            int d_idx = find_first_differing_nibble(key, rep_key);
+            if (d_idx != -1 && (uint32_t)d_idx < test_idx) {
+                return nullptr; // Key diverges from the path, so it can't be in the tree.
+            }
+
+            int nibble = get_nibble_at(key, test_idx);
             current_ptr = node->children[nibble].load(std::memory_order_acquire);
         }
     }

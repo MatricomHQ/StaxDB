@@ -245,28 +245,18 @@ void StaxCursor<Tree>::skip_current_branch(const AABB& query_box) {
         return;
     }
 
-    // The core idea is to ascend the stack until we find an ancestor node whose AABB
-    // still intersects the query box. From there, a normal move_next() will find
-    // the next relevant leaf in the tree.
-    while (!stack_.empty()) {
-        CursorFrame parent_frame = stack_.back();
-        // Restore the AABB to the state it was in when we were at the parent.
-        restore_aabb(parent_frame.aabb_log_size);
-
+    while(!stack_.empty()) {
+        restore_aabb(stack_.back().aabb_log_size);
         if (aabbs_intersect(*current_aabb_, query_box)) {
-            // This parent branch is still relevant. The normal move_next() will correctly
-            // find the next sibling of the branch we just came from and descend.
+            // This parent branch is relevant.
+            // The normal move_next logic will find the next leaf in this branch.
             move_next();
             return;
         }
-
-        // This parent branch is completely outside the query box, so we can prune it.
-        // Pop it from the stack and continue ascending.
+        // This whole parent branch is irrelevant, so we ascend further.
         stack_.pop_back();
     }
-
-    // If we exhaust the stack, it means no remaining branches of the tree can
-    // possibly intersect the query box. The cursor is now invalid.
+    // If we reach here, no more relevant branches were found.
     current_record_handle_ = nullptr;
 }
 

@@ -221,8 +221,7 @@ int main() {
     std::cout << "--- New Expanded Spatial Query Benchmarks ---" << std::endl;
     run_spatial_workload("2D Uniform", 2, 20000, 100, 0.01);
     run_spatial_workload("3D Uniform", 3, 20000, 100, 0.01);
-    run_spatial_workload("4D Uniform", 4, 20000, 100, 0.01);
     run_spatial_workload("8D Uniform", 8, 20000, 100, 0.01);
-    run_spatial_workload("1024D Uniform", 1024, 1000, 20, 0.01);
+    run_spatial_workload("1024D Uniform", 1024, 2000, 10, 0.01);
     return 0;
 }
