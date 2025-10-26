@@ -8,6 +8,7 @@
 #include <map>
 #include <algorithm>
 #include <set>
+#include <random>
 #include <cmath>
 
 // A minimal test context.
@@ -292,6 +293,68 @@ void test_query_knn() {
     std::cout << "SUCCESS" << std::endl;
 }
 
+void test_query_knn_randomized() {
+    std::cout << "Running test: test_query_knn_randomized..." << std::endl;
+    const uint32_t D = 4;
+    const size_t num_points = 1000;
+    const size_t k = 50;
+
+    // 1. Setup Tree
+    FileHeader mock_header;
+    mock_header.global_alloc_offset.store(1, std::memory_order_relaxed);
+    MockStaxAllocator mock_alloc;
+    StaxAllocator allocator_wrapper(&mock_header, mock_alloc.get_base_ptr());
+    ThreadLocalAllocator local_alloc(allocator_wrapper);
+    std::atomic<uint64_t> root_ptr = 0;
+    StaxTree16 tree(allocator_wrapper, root_ptr, D);
+
+    // 2. Generate and insert random data
+    std::mt19937_64 g(42); // Fixed seed
+    std::uniform_int_distribution<uint64_t> distrib;
+    std::vector<std::vector<uint64_t>> all_points;
+    all_points.reserve(num_points);
+    for (size_t i = 0; i < num_points; ++i) {
+        std::vector<uint64_t> p(D);
+        for (uint32_t d = 0; d < D; ++d) p[d] = distrib(g);
+        all_points.push_back(p);
+        // Use the index as the value for easy identification
+        tree.insert(local_alloc, TEST_CTX, SpatialKeywords::generate_apk(p.data(), D), std::to_string(i));
+    }
+
+    // 3. Define query point
+    std::vector<uint64_t> query_point(D);
+    for (uint32_t d = 0; d < D; ++d) query_point[d] = distrib(g);
+
+    // 4. Run StaxDB KNN query
+    QueryStats stats;
+    auto results = tree.query_knn(query_point.data(), k, stats);
+    assert(results.size() == k);
+
+    std::set<size_t> stax_results;
+    for (void* handle : results) {
+        StaxRecord* rec = allocator_wrapper.get_ptr<StaxRecord>(StaxTree16::get_offset(reinterpret_cast<uint64_t>(handle)));
+        stax_results.insert(std::stoul(std::string(rec->get_value_data())));
+    }
+
+    // 5. Brute-force validation
+    std::vector<std::pair<long double, size_t>> distances;
+    for (size_t i = 0; i < all_points.size(); ++i) {
+        distances.push_back({SpatialKeywords::PointDistSq(all_points[i].data(), query_point.data(), D), i});
+    }
+    std::sort(distances.begin(), distances.end());
+
+    std::set<size_t> ground_truth;
+    for (size_t i = 0; i < k; ++i) {
+        ground_truth.insert(distances[i].second);
+    }
+
+    // 6. Compare results
+    assert(stax_results == ground_truth);
+
+    std::cout << "SUCCESS" << std::endl;
+}
+
+
 int main() {
     try {
         test_apk_generation();
@@ -301,6 +364,7 @@ int main() {
         test_query_box();
         test_query_sphere();
         test_query_knn();
+        test_query_knn_randomized();
         std::cout << "All tests passed." << std::endl;
     } catch (const std::exception& e) {
         std::cerr << "A test failed with exception: " << e.what() << std::endl;

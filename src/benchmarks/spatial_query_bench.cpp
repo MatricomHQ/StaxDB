@@ -71,7 +71,7 @@ void run_spatial_workload(
     // 1. --- SETUP: Create Database and Generate Data ---
     FileHeader mock_header;
     mock_header.global_alloc_offset.store(1, std::memory_order_relaxed);
-    MockStaxAllocator mock_alloc(500); // Increased memory for larger datasets
+    MockStaxAllocator mock_alloc(1024); // Increased memory for larger datasets
     StaxAllocator allocator(&mock_header, mock_alloc.get_base_ptr());
     ThreadLocalAllocator local_alloc(allocator);
     std::atomic<uint64_t> root_ptr = 0;
@@ -183,11 +183,46 @@ void run_spatial_workload(
             print_spatial_query_stats("Sphere", D, target_selectivity, total_duration_ns / num_queries, total_stats);
         }
     }
+
+    // 5. --- BENCHMARK: KNN Query ---
+    {
+        QueryStats total_stats;
+        long long total_duration_ns = 0;
+        int k = target_records_in_query;
+
+        for (int i = 0; i < num_queries; ++i) {
+            const auto& center = query_centers[i];
+
+            QueryStats query_stats;
+            auto start = std::chrono::high_resolution_clock::now();
+            std::vector<void*> results = tree.query_knn(center.data(), k, query_stats);
+            auto end = std::chrono::high_resolution_clock::now();
+
+            total_duration_ns += std::chrono::duration_cast<std::chrono::nanoseconds>(end - start).count();
+            total_stats.nodes_visited += query_stats.nodes_visited;
+            total_stats.leaves_visited += query_stats.leaves_visited;
+            total_stats.records_loaded += query_stats.records_loaded;
+            total_stats.records_scanned += query_stats.records_scanned;
+            total_stats.records_accepted += query_stats.records_accepted;
+        }
+
+        if (num_queries > 0) {
+            total_stats.nodes_visited /= num_queries;
+            total_stats.leaves_visited /= num_queries;
+            total_stats.records_loaded /= num_queries;
+            total_stats.records_scanned /= num_queries;
+            total_stats.records_accepted /= num_queries;
+            print_spatial_query_stats("KNN", D, target_selectivity, total_duration_ns / num_queries, total_stats);
+        }
+    }
 }
 
 int main() {
     std::cout << "--- New Expanded Spatial Query Benchmarks ---" << std::endl;
     run_spatial_workload("2D Uniform", 2, 20000, 100, 0.01);
     run_spatial_workload("3D Uniform", 3, 20000, 100, 0.01);
+    run_spatial_workload("4D Uniform", 4, 20000, 100, 0.01);
+    run_spatial_workload("8D Uniform", 8, 20000, 100, 0.01);
+    run_spatial_workload("1024D Uniform", 1024, 20000, 100, 0.01);
     return 0;
 }
