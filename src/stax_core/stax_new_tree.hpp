@@ -191,9 +191,9 @@ public:
     }
 
     // Dimensional query methods
-    std::vector<void*> query_box(const AABB& query_box) const;
-    std::vector<void*> query_sphere(const uint64_t* center, long double radius) const;
-    std::vector<void*> query_knn(const uint64_t* query_point, int k) const;
+    std::vector<void*> query_box(const AABB& query_box, QueryStats& stats) const;
+    std::vector<void*> query_sphere(const uint64_t* center, long double radius, QueryStats& stats) const;
+    std::vector<void*> query_knn(const uint64_t* query_point, int k, QueryStats& stats) const;
 
     void insert(ThreadLocalAllocator& local_alloc, const TxnContext &ctx, std::string_view key, std::string_view value, bool is_delete = false);
     void range_scan(const TxnContext &ctx, std::string_view start_key, std::string_view end_key, std::vector<StaxRecord*>& results) const;
@@ -399,17 +399,21 @@ inline std::optional<StaxPath> StaxTree16::find_path_for_seek(std::string_view k
 
 #include "dimensional.inl"
 
-inline std::vector<void*> StaxTree16::query_box(const AABB& query_box) const {
+inline std::vector<void*> StaxTree16::query_box(const AABB& query_box, QueryStats& stats) const {
     std::vector<void*> results;
     auto cursor = create_cursor("", "\xFF", true); // Max range
     cursor->seek_first();
+    stats.nodes_visited++;
 
     while (cursor->is_valid()) {
+        stats.leaves_visited++;
         const AABB* current_aabb = cursor->get_current_aabb();
         if (aabbs_intersect(*current_aabb, query_box)) {
+            stats.records_loaded++;
             StaxRecord* record = allocator_.get_ptr<StaxRecord>(get_offset(reinterpret_cast<uint64_t>(cursor->get_record_handle())));
             std::vector<uint64_t> coords(D_);
             SpatialKeywords::get_coords_from_apk(record->get_key(), coords.data(), D_);
+            stats.records_scanned++;
             bool in_box = true;
             for(uint32_t i=0; i < D_; ++i) {
                 if (coords[i] < query_box.min_bounds[i] || coords[i] > query_box.max_bounds[i]) {
@@ -418,6 +422,7 @@ inline std::vector<void*> StaxTree16::query_box(const AABB& query_box) const {
                 }
             }
             if (in_box) {
+                stats.records_accepted++;
                 results.push_back(cursor->get_record_handle());
             }
             cursor->move_next();
@@ -428,7 +433,7 @@ inline std::vector<void*> StaxTree16::query_box(const AABB& query_box) const {
     return results;
 }
 
-inline std::vector<void*> StaxTree16::query_sphere(const uint64_t* center, long double radius) const {
+inline std::vector<void*> StaxTree16::query_sphere(const uint64_t* center, long double radius, QueryStats& stats) const {
     // 1. Create a bounding box from the sphere.
     AABB sphere_box(D_);
     for (uint32_t i = 0; i < D_; ++i) {
@@ -437,16 +442,23 @@ inline std::vector<void*> StaxTree16::query_sphere(const uint64_t* center, long 
     }
 
     // 2. Use query_box to get candidate points.
-    std::vector<void*> candidates = query_box(sphere_box);
+    QueryStats box_stats;
+    std::vector<void*> candidates = query_box(sphere_box, box_stats);
+    stats.nodes_visited += box_stats.nodes_visited;
+    stats.leaves_visited += box_stats.leaves_visited;
+    stats.records_loaded += box_stats.records_loaded;
+
     std::vector<void*> results;
     long double radius_sq = radius * radius;
 
     // 3. Final filtering.
     for (void* handle : candidates) {
+        stats.records_scanned++;
         StaxRecord* record = allocator_.get_ptr<StaxRecord>(get_offset(reinterpret_cast<uint64_t>(handle)));
         std::vector<uint64_t> coords(D_);
         SpatialKeywords::get_coords_from_apk(record->get_key(), coords.data(), D_);
         if (SpatialKeywords::PointDistSq(coords.data(), center, D_) <= radius_sq) {
+            stats.records_accepted++;
             results.push_back(handle);
         }
     }
@@ -454,7 +466,7 @@ inline std::vector<void*> StaxTree16::query_sphere(const uint64_t* center, long 
     return results;
 }
 
-inline std::vector<void*> StaxTree16::query_knn(const uint64_t* query_point, int k) const {
+inline std::vector<void*> StaxTree16::query_knn(const uint64_t* query_point, int k, QueryStats& stats) const {
     if (k <= 0) return {};
 
     std::string center_key = SpatialKeywords::generate_apk(query_point, D_);
@@ -474,23 +486,27 @@ inline std::vector<void*> StaxTree16::query_knn(const uint64_t* query_point, int
     bool backward_pruned = false;
 
     while ((forward_cursor->is_valid() && !forward_pruned) || (backward_cursor->is_valid() && !backward_pruned)) {
-
+        stats.nodes_visited++;
         long double current_max_dist_sq = (best_results.size() == static_cast<size_t>(k)) ? best_results.top().first : -1.0L;
 
         // --- Process Forward Cursor ---
         if (forward_cursor->is_valid() && !forward_pruned) {
+            stats.leaves_visited++;
             const AABB* box = forward_cursor->get_current_aabb();
             if (current_max_dist_sq >= 0 && SpatialKeywords::distance_to_box_sq(query_point, *box, D_) > current_max_dist_sq) {
                 forward_pruned = true;
             } else {
                 void* handle = forward_cursor->get_record_handle();
+                stats.records_loaded++;
                 StaxRecord* record = allocator_.get_ptr<StaxRecord>(get_offset(reinterpret_cast<uint64_t>(handle)));
                 std::vector<uint64_t> coords(D_);
                 SpatialKeywords::get_coords_from_apk(record->get_key(), coords.data(), D_);
+                stats.records_scanned++;
                 long double dist_sq = SpatialKeywords::PointDistSq(coords.data(), query_point, D_);
 
                 if (best_results.size() < static_cast<size_t>(k)) {
                     best_results.push({dist_sq, handle});
+                    stats.records_accepted++;
                 } else if (dist_sq < best_results.top().first) {
                     best_results.pop();
                     best_results.push({dist_sq, handle});
@@ -501,17 +517,21 @@ inline std::vector<void*> StaxTree16::query_knn(const uint64_t* query_point, int
 
         // --- Process Backward Cursor ---
         if (backward_cursor->is_valid() && !backward_pruned) {
+             stats.leaves_visited++;
              const AABB* box = backward_cursor->get_current_aabb();
              if (current_max_dist_sq >= 0 && SpatialKeywords::distance_to_box_sq(query_point, *box, D_) > current_max_dist_sq) {
                 backward_pruned = true;
             } else {
                 void* handle = backward_cursor->get_record_handle();
+                stats.records_loaded++;
                 StaxRecord* record = allocator_.get_ptr<StaxRecord>(get_offset(reinterpret_cast<uint64_t>(handle)));
                 std::vector<uint64_t> coords(D_);
                 SpatialKeywords::get_coords_from_apk(record->get_key(), coords.data(), D_);
+                stats.records_scanned++;
                 long double dist_sq = SpatialKeywords::PointDistSq(coords.data(), query_point, D_);
                 if (best_results.size() < static_cast<size_t>(k)) {
                     best_results.push({dist_sq, handle});
+                     stats.records_accepted++;
                 } else if (dist_sq < best_results.top().first) {
                     best_results.pop();
                     best_results.push({dist_sq, handle});

@@ -11,7 +11,7 @@
 #include <algorithm>
 #include <map>
 
-FlexDoc::FlexDoc(DataView raw_data, std::string_view primary_key) : data_(raw_data), primary_key_(primary_key) {}
+FlexDoc::FlexDoc(DataView raw_data) : data_(raw_data) {}
 
 std::optional<std::string_view> FlexDoc::get_field(std::string_view field_name) const
 {
@@ -60,12 +60,6 @@ QueryBuilder &QueryBuilder::where_string(std::string_view attribute, QueryOp op,
     return *this;
 }
 
-QueryBuilder &QueryBuilder::where_string(std::string_view attribute, QueryOp op, std::string_view val1, std::string_view val2)
-{
-    conditions_.push_back({std::string(attribute), op, val1, val2});
-    return *this;
-}
-
 QueryBuilder &QueryBuilder::limit(size_t max_results)
 {
     limit_ = max_results;
@@ -88,52 +82,92 @@ std::vector<FlexDoc> QueryBuilder::execute()
         throw std::runtime_error("Database not set for QueryBuilder");
 
     Collection &col = db_->get_collection_by_idx(collection_idx_);
-    TxnContext ctx = col.begin_transaction_context(thread_id_, true); // Read-only is fine for queries
-    std::vector<FlexDoc> results;
 
-    // Fast path for primary key range scan
-    if (conditions_.size() == 1 && conditions_[0].attribute_name == "primary_key" && conditions_[0].op == QueryOp::BETWEEN) {
-        const auto& cond = conditions_[0];
-        if (std::holds_alternative<std::string_view>(cond.value1) && cond.value2 && std::holds_alternative<std::string_view>(*cond.value2)) {
-            std::string_view start_key = std::get<std::string_view>(cond.value1);
-            std::string_view end_key = std::get<std::string_view>(*cond.value2);
+    TxnContext ctx = col.begin_transaction_context(thread_id_, false);
+    TransactionBatch batch;
 
-            for (auto cursor = col.seek(ctx, start_key, end_key); cursor->is_valid(); cursor->next()) {
-                if (results.size() >= limit_) {
-                    break;
-                }
-                results.emplace_back(cursor->value(), cursor->key());
-            }
-            col.abort(ctx); // Abort read-only transaction
-            return results;
-        }
-    }
-
-    // Fast path for primary key prefix scan
-    if (conditions_.size() == 1 && conditions_[0].attribute_name == "primary_key" && conditions_[0].op == QueryOp::PREFIX) {
-        const auto& cond = conditions_[0];
-        if (std::holds_alternative<std::string_view>(cond.value1)) {
-            std::string_view prefix = std::get<std::string_view>(cond.value1);
-
-            for (auto cursor = col.seek(ctx, prefix); cursor->is_valid() && cursor->key().starts_with(prefix); cursor->next()) {
-                if (results.size() >= limit_) {
-                    break;
-                }
-                results.emplace_back(cursor->value(), cursor->key());
-            }
-            col.abort(ctx); // Abort read-only transaction
-            return results;
-        }
-    }
-
-    // Existing logic with roaring bitmaps for secondary indexes
     roaring_bitmap_t *final_ids = roaring_bitmap_create();
     bool first_filter = true;
 
+    std::map<std::string, int> z_order_schema = {
+        {"f1_region", 0}, {"f2_category", 1}, {"f3_status", 2}};
+
+    bool has_z_cond = false;
     for (const auto &cond : conditions_)
     {
-        // Only handle simple string equality on secondary indexes for now.
-        if (std::holds_alternative<std::string_view>(cond.value1) && cond.op == QueryOp::EQ) {
+        if (z_order_schema.count(cond.attribute_name))
+        {
+            has_z_cond = true;
+            break;
+        }
+    }
+
+    if (has_z_cond)
+    {
+        std::string doc_prefix = "doc:" + ns_ + ":";
+
+        for (auto cursor = col.seek(ctx, doc_prefix); cursor->is_valid() && cursor->key().starts_with(doc_prefix); cursor->next())
+        {
+            FlexDoc doc(cursor->value());
+            bool matches_all = true;
+            for (const auto &cond : conditions_)
+            {
+                if (cond.op != QueryOp::EQ)
+                {
+                    matches_all = false;
+                    break;
+                }
+
+                auto field_sv = doc.get_field(cond.attribute_name);
+                if (!field_sv)
+                {
+                    matches_all = false;
+                    break;
+                }
+
+                bool field_matches = false;
+                if (std::holds_alternative<uint64_t>(cond.value1))
+                {
+                    uint64_t doc_val;
+                    if (PathEngine::value_to_uint64(*field_sv, doc_val) && doc_val == std::get<uint64_t>(cond.value1))
+                    {
+                        field_matches = true;
+                    }
+                }
+                else
+                {
+                    if (*field_sv == std::get<std::string_view>(cond.value1))
+                    {
+                        field_matches = true;
+                    }
+                }
+
+                if (!field_matches)
+                {
+                    matches_all = false;
+                    break;
+                }
+            }
+
+            if (matches_all)
+            {
+                auto id_sv = doc.get_field("id");
+                if (id_sv)
+                {
+                    uint64_t id;
+                    if (PathEngine::value_to_uint64(*id_sv, id))
+                    {
+                        roaring_bitmap_add(final_ids, static_cast<uint32_t>(id));
+                    }
+                }
+            }
+        }
+        first_filter = false;
+    }
+    else
+    {
+        for (const auto &cond : conditions_)
+        {
             roaring_bitmap_t *str_ids = roaring_bitmap_create();
             char key_buffer[256];
             int len = snprintf(key_buffer, sizeof(key_buffer), "idx_str:%s:%s:%.*s:",
@@ -166,9 +200,9 @@ std::vector<FlexDoc> QueryBuilder::execute()
                 roaring_bitmap_free(str_ids);
             }
         }
-        // NOTE: Other condition types (numeric, z-order) are omitted for simplicity as they were not fully implemented.
     }
 
+    std::vector<FlexDoc> results;
     uint64_t count = roaring_bitmap_get_cardinality(final_ids);
     if (count > 0)
     {
@@ -184,9 +218,10 @@ std::vector<FlexDoc> QueryBuilder::execute()
             int len = snprintf(doc_key_buffer, sizeof(doc_key_buffer), "doc:%s:%u", ns_.c_str(), id);
             if (len > 0 && (size_t)len < sizeof(doc_key_buffer))
             {
+
                 if (auto record_data = col.get(ctx, std::string_view(doc_key_buffer, len)))
                 {
-                    results.emplace_back(DataView(record_data->value_ptr, record_data->value_len), std::string_view(doc_key_buffer, len));
+                    results.emplace_back(DataView(record_data->value_ptr, record_data->value_len));
                     retrieved_count++;
                 }
             }
@@ -196,6 +231,6 @@ std::vector<FlexDoc> QueryBuilder::execute()
     }
 
     roaring_bitmap_free(final_ids);
-    col.abort(ctx); // Abort read-only transaction
+    col.commit(ctx, batch);
     return results;
 }

@@ -143,6 +143,13 @@ add_executable(stax_dimensional_benchmark
 target_link_libraries(stax_dimensional_benchmark PRIVATE stax_db stax_core)
 
 
+# --- Spatial Query Benchmark Runner Executable ---
+add_executable(stax_spatial_query_benchmark
+    src/benchmarks/spatial_query_bench.cpp
+)
+target_link_libraries(stax_spatial_query_benchmark PRIVATE stax_db stax_core)
+
+
 # Removed separate executables for TCP server and client.
 # Their source files are now part of stax_benchmark.
 

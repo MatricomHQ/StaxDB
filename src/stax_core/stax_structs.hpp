@@ -63,3 +63,12 @@ struct AABB {
         max_bounds.fill(UINT64_MAX);
     }
 };
+
+// A struct to hold statistics about a query's execution.
+struct QueryStats {
+    long long nodes_visited = 0;
+    long long leaves_visited = 0;
+    long long records_loaded = 0;
+    long long records_scanned = 0;
+    long long records_accepted = 0;
+};

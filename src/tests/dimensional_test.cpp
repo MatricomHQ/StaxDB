@@ -185,7 +185,8 @@ void test_query_box() {
     query_aabb.max_bounds[0] = 200;
     query_aabb.max_bounds[1] = 200;
 
-    auto results = tree.query_box(query_aabb);
+    QueryStats stats;
+    auto results = tree.query_box(query_aabb, stats);
 
     assert(results.size() == 2);
 
@@ -225,7 +226,8 @@ void test_query_sphere() {
     const long double radius = 15.0L; // radius_sq = 225
 
     // p1 should be inside, p2 should be outside
-    auto results = tree.query_sphere(center, radius);
+    QueryStats stats;
+    auto results = tree.query_sphere(center, radius, stats);
 
     assert(results.size() == 1);
 
@@ -270,7 +272,8 @@ void test_query_knn() {
     // 2. p1 {10, 10} -> dist_sq = 6^2 + 6^2 = 72
     // 3. p2 {12, 12} -> dist_sq = 8^2 + 8^2 = 128
 
-    auto results = tree.query_knn(query_point, k);
+    QueryStats stats;
+    auto results = tree.query_knn(query_point, k, stats);
     assert(results.size() == k);
 
     std::set<std::string_view> result_values;
