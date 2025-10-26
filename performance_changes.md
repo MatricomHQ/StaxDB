@@ -1,95 +1,36 @@
-# StaxDB Performance Optimizations
+# Performance Changes
 
-This document tracks the performance improvements made to StaxDB.
+This document tracks the performance changes for the spatial query benchmarks.
 
-## Baseline Performance
+## Before
 
-The following table shows the baseline performance of StaxDB before any optimizations were applied. The benchmarks were run with 64 threads.
+| Query Type | Dimensions | Lat (ns/op) | ns/item | Nodes Visited | Leaves Visited | Recs Loaded | Recs Scanned | Recs Accepted | Efficiency |
+|------------|------------|-------------|---------|---------------|----------------|-------------|--------------|---------------|------------|
+| Box        | 2D         | 1,398,875   | 344     | 5,866         | 4,400          | 4,400       | 4,400        | 4,066         | 0.924      |
+| Sphere     | 2D         | 1,301,315   | 332     | 5,866         | 4,400          | 4,400       | 4,066        | 3,909         | 0.961      |
+| Box        | 3D         | 4,482,242   | 411     | 17,114        | 12,800         | 12,800      | 12,800       | 10,884        | 0.850      |
+| Sphere     | 3D         | 4,174,676   | 440     | 17,114        | 12,800         | 12,800      | 10,884       | 9,470         | 0.870      |
+| Box        | 4D         | 2,409,291   | 156     | 21,674        | 16,200         | 16,200      | 16,200       | 15,429        | 0.952      |
+| Sphere     | 4D         | 2,547,859   | 189     | 21,674        | 16,200         | 16,200      | 15,429       | 13,414        | 0.869      |
+| Box        | 8D         | 3,173,199   | 163     | 25,885        | 19,400         | 19,400      | 19,400       | 19,362        | 0.998      |
+| Sphere     | 8D         | 3,441,817   | 201     | 25,885        | 19,400         | 19,400      | 19,362       | 17,047        | 0.880      |
 
-| Key Type | Operation | Time (ns) |
-|---|---|---|
-| Sequential | Insert | 166.20 |
-| Sequential | Get | 62.93 |
-| Long Sequential | Insert | 206.84 |
-| Long Sequential | Get | 65.76 |
-| Random | Insert | N/A (Timeout) |
-| Random | Get | N/A (Timeout) |
+## After
 
-## Optimization 1: Increase Arena Size to 128KB (Failed)
-
-Increased the `ThreadLocalAllocator` arena size from 32KB to 128KB. This change resulted in a performance *degradation*.
-
-| Key Type | Operation | Baseline (ns) | After Change (ns) | Change (%) |
-|---|---|---|---|---|
-| Sequential | Insert | 166.20 | 220.68 | -32.78% |
-| Sequential | Get | 62.93 | 84.48 | -34.25% |
-| Long Sequential | Insert | 206.84 | 360.17 | -74.13% |
-| Long Sequential | Get | 65.76 | 123.68 | -88.07% |
-
-## Optimization 2: Inline `get_visible_record`
-
-Inlined the `get_visible_record` function. This resulted in a marginal improvement for sequential gets, but a significant degradation for long sequential inserts.
-
-| Key Type | Operation | Baseline (ns) | After Change (ns) | Change (%) |
-|---|---|---|---|---|
-| Sequential | Insert | 166.20 | 163.86 | +1.41% |
-| Sequential | Get | 62.93 | 62.50 | +0.68% |
-| Long Sequential | Insert | 206.84 | 326.11 | -57.66% |
-| Long Sequential | Get | 65.76 | 100.29 | -52.51% |
-
-## Correctness Fix: Full Key Comparison in `get`
-
-Fixed a correctness bug in the `get` method to perform a full key comparison. This is the new baseline for further optimizations.
-
-| Key Type | Operation | Baseline (ns) | After Change (ns) | Change (%) |
-|---|---|---|---|---|
-| Sequential | Insert | 163.86 | 164.73 | -0.53% |
-| Sequential | Get | 62.50 | 60.10 | +3.84% |
-| Long Sequential | Insert | 326.11 | 547.97 | -68.03% |
-| Long Sequential | Get | 100.29 | 65.35 | +34.84% |
-
-## Optimization 3: Hoist `is_leaf` Check (Failed)
-
-Hoisted the `is_leaf` check out of the main traversal loop in the `get` method. This resulted in a significant performance *degradation*.
-
-| Key Type | Operation | Baseline (ns) | After Change (ns) | Change (%) |
-|---|---|---|---|---|
-| Sequential | Insert | 164.73 | 163.99 | +0.45% |
-| Sequential | Get | 60.10 | 72.63 | -20.85% |
-| Long Sequential | Insert | 547.97 | 250.61 | +54.27% |
-| Long Sequential | Get | 65.35 | 79.48 | -21.62% |
-
-## Optimization 4: ARM NEON for `find_first_differing_nibble` (Failed)
-
-Completed the ARM NEON implementation for the `find_first_differing_nibble` function. This resulted in a significant performance *degradation*.
-
-| Key Type | Operation | Baseline (ns) | After Change (ns) | Change (%) |
-|---|---|---|---|---|
-| Sequential | Insert | 163.99 | 317.22 | -93.44% |
-| Sequential | Get | 72.63 | 96.20 | -32.45% |
-| Long Sequential | Insert | 250.61 | N/A (Timeout) | N/A |
-| Long Sequential | Get | 79.48 | N/A (Timeout) | N/A |
-
-## Optimization 5: Use `fetch_add` in `StaxAllocator`
-
-Replaced the `compare_exchange_weak` loop with a `fetch_add` operation in the `StaxAllocator`. This resulted in a significant performance improvement for long sequential keys, but a slight regression for shorter keys.
-
-| Key Type | Operation | Baseline (ns) | After Change (ns) | Change (%) |
-|---|---|---|---|---|
-| Sequential | Insert | 317.22 | 171.88 | +45.81% |
-| Sequential | Get | 96.20 | 70.85 | +26.35% |
-| Long Sequential | Insert | N/A (Timeout) | 182.38 | N/A |
-| Long Sequential | Get | N/A (Timeout) | 60.03 | N/A |
-
-## Optimization 6: Refactor `insert` to Remove `goto`
-
-Refactored the `insert` function to remove `goto` statements and added `_mm_pause()` to the CAS loops. This resulted in a performance improvement for sequential inserts, but a regression for long sequential inserts.
-
-| Key Type | Operation | Baseline (ns) | After Change (ns) | Change (%) |
-|---|---|---|---|---|
-| Sequential | Insert | 171.88 | 158.42 | +7.83% |
-| Sequential | Get | 70.85 | 58.35 | +17.64% |
-| Long Sequential | Insert | 182.38 | 176.83 | +3.04% |
-| Long Sequential | Get | 60.03 | 59.51 | +0.87% |
-| Random | Insert | N/A (Timeout) | 233.32 | N/A |
-| Random | Get | N/A (Timeout) | 92.98 | N/A |
+| Query Type | Dimensions | Lat (ns/op) | ns/item | Nodes Visited | Leaves Visited | Recs Loaded | Recs Scanned | Recs Accepted | Efficiency |
+|------------|------------|-------------|---------|---------------|----------------|-------------|--------------|---------------|------------|
+| Box        | 2D         | 280,580     | 198     | 1             | 2,551          | 2,547       | 2,547        | 1,410         | 0.554      |
+| Sphere     | 2D         | 419,545     | 255     | 1             | 2,975          | 2,971       | 1,834        | 1,643         | 0.896      |
+| **KNN**    | **2D**     | **80,506**  | **271** | **438**       | **438**        | **436**     | **436**      | **297**       | **0.681**  |
+| Box        | 3D         | 1,211,777   | 129     | 1             | 11,462         | 11,454      | 11,454       | 9,389         | 0.820      |
+| Sphere     | 3D         | 2,186,520   | 216     | 1             | 14,429         | 14,422      | 12,357       | 10,079        | 0.816      |
+| **KNN**    | **3D**     | **79,049**  | **291** | **369**       | **369**        | **367**     | **367**      | **271**       | **0.738**  |
+| Box        | 4D         | 1,177,487   | 122     | 1             | 10,648         | 10,641      | 10,641       | 9,620         | 0.904      |
+| Sphere     | 4D         | 3,103,415   | 231     | 1             | 17,667         | 17,661      | 16,640       | 13,381        | 0.804      |
+| **KNN**    | **4D**     | **81,919**  | **316** | **345**       | **345**        | **343**     | **343**      | **259**       | **0.755**  |
+| Box        | 8D         | 51,099      | 268     | 1             | 215            | 212         | 212          | 190           | 0.896      |
+| Sphere     | 8D         | 5,346,536   | 294     | 1             | 21,297         | 21,297      | 21,274       | 18,163        | 0.854      |
+| **KNN**    | **8D**     | **88,935**  | **386** | **259**       | **259**        | **257**     | **257**      | **230**       | **0.895**  |
+| **Box**    | **1024D**  | **3,699**   | **0**   | **1**         | **2**          | **0**       | **0**        | **0**         | **0.000**  |
+| **Sphere** | **1024D**  | **15,600,567**| **2,228,652**| **1**   | **1,063**      | **1,063**   | **1,063**    | **7**         | **0.007**  |
+| **KNN**    | **1024D**  | **16,147,411**| **351,030**| **1,110** | **1,109**      | **1,109**   | **1,109**    | **46**        | **0.041**  |
