@@ -7,19 +7,40 @@
 #include <memory>
 #include <atomic>
 #include <cmath>
+#include <cassert>
+#include <algorithm>
+#include <set>
 
 #include "stax_core/stax_new_tree.hpp"
 #include "stax_core/dimensional.hpp"
 #include "stax_db/arena_structs.h" // For FileHeader
 
-// Helper function to print statistics in the desired format
-void print_spatial_query_stats(const std::string& query_type, uint32_t D, double selectivity, long long duration_ns, const QueryStats& stats) {
+// Helper to print a coordinate vector for debugging
+void print_point(const std::vector<uint64_t>& p) {
+    std::cout << "(";
+    for (size_t i = 0; i < p.size(); ++i) {
+        std::cout << p[i] << (i == p.size() - 1 ? "" : ", ");
+    }
+    std::cout << ")";
+}
+
+
+void print_benchmark_header(const std::string& query_type, uint32_t D, double selectivity) {
+    std::cout << "\n--- " << query_type << " Query Benchmark (" << D << "D, " << std::fixed << std::setprecision(3) << selectivity * 100 << "% selectivity) ---" << std::endl;
+    std::cout << " Lat (ns/op) | ns/item | Nodes Visited | Leaves Visited | Recs Loaded | Recs Scanned | Recs Accepted | Expected | Correct | Efficiency" << std::endl;
+    std::cout << "--------------------------------------------------------------------------------------------------------------------------------------------------" << std::endl;
+}
+
+void print_query_stats_row(
+    long long duration_ns,
+    const QueryStats& stats,
+    size_t expected_records,
+    bool correct,
+    const std::set<std::vector<uint64_t>>& tree_results,
+    const std::set<std::vector<uint64_t>>& brute_force_results
+) {
     double efficiency = (stats.records_scanned > 0) ? static_cast<double>(stats.records_accepted) / stats.records_scanned : 1.0;
     long long ns_per_item = (stats.records_accepted > 0) ? (duration_ns / stats.records_accepted) : 0;
-
-    std::cout << "\n--- " << query_type << " Query Benchmark (" << D << "D, " << std::fixed << std::setprecision(3) << selectivity * 100 << "% selectivity) ---" << std::endl;
-    std::cout << " Lat (ns/op) | ns/item | Nodes Visited | Leaves Visited | Recs Loaded | Recs Scanned | Recs Accepted | Efficiency" << std::endl;
-    std::cout << "--------------------------------------------------------------------------------------------------------------------------------" << std::endl;
     std::cout << " " << std::left << std::setw(12) << duration_ns
               << " | " << std::setw(8) << ns_per_item
               << " | " << std::setw(13) << stats.nodes_visited
@@ -27,7 +48,36 @@ void print_spatial_query_stats(const std::string& query_type, uint32_t D, double
               << " | " << std::setw(11) << stats.records_loaded
               << " | " << std::setw(12) << stats.records_scanned
               << " | " << std::setw(13) << stats.records_accepted
+              << " | " << std::setw(8) << expected_records
+              << " | " << std::setw(7) << (correct ? "PASS" : "FAIL")
               << " | " << std::fixed << std::setprecision(3) << efficiency << std::endl;
+
+    if (!correct) {
+        std::vector<std::vector<uint64_t>> in_tree_not_brute, in_brute_not_tree;
+        std::set_difference(tree_results.begin(), tree_results.end(),
+                            brute_force_results.begin(), brute_force_results.end(),
+                            std::back_inserter(in_tree_not_brute));
+        std::set_difference(brute_force_results.begin(), brute_force_results.end(),
+                            tree_results.begin(), tree_results.end(),
+                            std::back_inserter(in_brute_not_tree));
+
+        if (!in_tree_not_brute.empty()) {
+            std::cout << "     [DEBUG] Points in TREE result but NOT in Brute-Force result:" << std::endl;
+            for(const auto& p : in_tree_not_brute) {
+                std::cout << "      - ";
+                print_point(p);
+                std::cout << std::endl;
+            }
+        }
+        if (!in_brute_not_tree.empty()) {
+            std::cout << "     [DEBUG] Points in Brute-Force result but NOT in TREE result:" << std::endl;
+            for(const auto& p : in_brute_not_tree) {
+                std::cout << "      - ";
+                print_point(p);
+                std::cout << std::endl;
+            }
+        }
+    }
 }
 
 // Main function to run a full spatial workload benchmark
@@ -56,6 +106,8 @@ void run_spatial_workload(
     std::uniform_int_distribution<uint64_t> distrib;
     std::vector<std::vector<uint64_t>> inserted_points;
     inserted_points.reserve(num_points);
+    std::vector<std::vector<uint64_t>> ground_truth_points;
+    ground_truth_points.reserve(num_points);
 
     for (size_t i = 0; i < num_points; ++i) {
         std::vector<uint64_t> p(D);
@@ -63,6 +115,10 @@ void run_spatial_workload(
         inserted_points.push_back(p);
         std::string key = SpatialKeywords::generate_apk(p.data(), D);
         tree.insert(local_alloc, ctx, key, "");
+
+        std::vector<uint64_t> decoded_p(D);
+        SpatialKeywords::get_coords_from_apk(key, decoded_p.data(), D);
+        ground_truth_points.push_back(decoded_p);
     }
     std::cout << " Data generation complete." << std::endl;
 
@@ -74,7 +130,8 @@ void run_spatial_workload(
     std::uniform_int_distribution<size_t> point_dist(0, num_points - 1);
 
     for (int i = 0; i < num_queries; ++i) {
-        query_centers[i] = inserted_points[point_dist(g)];
+        // CRITICAL FIX: Use the ground_truth_points for query centers to ensure precision consistency.
+        query_centers[i] = ground_truth_points[point_dist(g)];
         std::vector<void*> knn_results = tree.query_knn(query_centers[i].data(), target_records_in_query);
 
         if (knn_results.size() >= target_records_in_query) {
@@ -91,9 +148,7 @@ void run_spatial_workload(
 
     // 3. --- BENCHMARK: Box Query ---
     {
-        long long total_duration_ns = 0;
-        QueryStats total_stats;
-
+        print_benchmark_header("Box", D, target_selectivity);
         for (int i = 0; i < num_queries; ++i) {
             const auto& center = query_centers[i];
             uint64_t radius = static_cast<uint64_t>(query_radii[i]);
@@ -107,30 +162,37 @@ void run_spatial_workload(
             auto start = std::chrono::high_resolution_clock::now();
             std::vector<void*> results = tree.query_box(query_aabb, &query_stats);
             auto end = std::chrono::high_resolution_clock::now();
+            long long duration_ns = std::chrono::duration_cast<std::chrono::nanoseconds>(end - start).count();
 
-            total_duration_ns += std::chrono::duration_cast<std::chrono::nanoseconds>(end - start).count();
-            total_stats.nodes_visited += query_stats.nodes_visited;
-            total_stats.leaves_visited += query_stats.leaves_visited;
-            total_stats.records_loaded += query_stats.records_loaded;
-            total_stats.records_scanned += query_stats.records_scanned;
-            total_stats.records_accepted += query_stats.records_accepted;
-        }
-
-        if (num_queries > 0) {
-            total_stats.nodes_visited /= num_queries;
-            total_stats.leaves_visited /= num_queries;
-            total_stats.records_loaded /= num_queries;
-            total_stats.records_scanned /= num_queries;
-            total_stats.records_accepted /= num_queries;
-            print_spatial_query_stats("Box", D, target_selectivity, total_duration_ns / num_queries, total_stats);
+            // Correctness Test
+            std::set<std::vector<uint64_t>> brute_force_results;
+            for (const auto& p : ground_truth_points) {
+                bool in_box = true;
+                for (uint32_t d = 0; d < D; ++d) {
+                    if (p[d] < query_aabb.min_bounds[d] || p[d] > query_aabb.max_bounds[d]) {
+                        in_box = false;
+                        break;
+                    }
+                }
+                if (in_box) {
+                    brute_force_results.insert(p);
+                }
+            }
+            std::set<std::vector<uint64_t>> tree_results;
+            for (void* handle : results) {
+                StaxRecord* record = stax_alloc.get_ptr<StaxRecord>(StaxTree16::get_offset(reinterpret_cast<uint64_t>(handle)));
+                std::vector<uint64_t> coords(D);
+                SpatialKeywords::get_coords_from_apk(record->get_key(), coords.data(), D);
+                tree_results.insert(coords);
+            }
+            bool correct = (tree_results == brute_force_results);
+            print_query_stats_row(duration_ns, query_stats, brute_force_results.size(), correct, tree_results, brute_force_results);
         }
     }
 
     // 4. --- BENCHMARK: Sphere Query ---
     {
-        long long total_duration_ns = 0;
-        QueryStats total_stats;
-
+        print_benchmark_header("Sphere", D, target_selectivity);
         for (int i = 0; i < num_queries; ++i) {
             const auto& center = query_centers[i];
             double radius = query_radii[i];
@@ -139,31 +201,72 @@ void run_spatial_workload(
             auto start = std::chrono::high_resolution_clock::now();
             std::vector<void*> results = tree.query_sphere(center.data(), radius, &query_stats);
             auto end = std::chrono::high_resolution_clock::now();
+            long long duration_ns = std::chrono::duration_cast<std::chrono::nanoseconds>(end - start).count();
 
-            total_duration_ns += std::chrono::duration_cast<std::chrono::nanoseconds>(end - start).count();
-            total_stats.nodes_visited += query_stats.nodes_visited;
-            total_stats.leaves_visited += query_stats.leaves_visited;
-            total_stats.records_loaded += query_stats.records_loaded;
-            total_stats.records_scanned += query_stats.records_scanned;
-            total_stats.records_accepted += query_stats.records_accepted;
+            // Correctness Test
+            std::set<std::vector<uint64_t>> brute_force_results;
+            double radius_sq = radius * radius;
+            for (const auto& p : ground_truth_points) {
+                if (SpatialKeywords::PointDistSq(p.data(), center.data(), D) <= radius_sq) {
+                    brute_force_results.insert(p);
+                }
+            }
+            std::set<std::vector<uint64_t>> tree_results;
+            for (void* handle : results) {
+                StaxRecord* record = stax_alloc.get_ptr<StaxRecord>(StaxTree16::get_offset(reinterpret_cast<uint64_t>(handle)));
+                std::vector<uint64_t> coords(D);
+                SpatialKeywords::get_coords_from_apk(record->get_key(), coords.data(), D);
+                tree_results.insert(coords);
+            }
+            bool correct = (tree_results == brute_force_results);
+            print_query_stats_row(duration_ns, query_stats, brute_force_results.size(), correct, tree_results, brute_force_results);
         }
+    }
 
-        if (num_queries > 0) {
-            total_stats.nodes_visited /= num_queries;
-            total_stats.leaves_visited /= num_queries;
-            total_stats.records_loaded /= num_queries;
-            total_stats.records_scanned /= num_queries;
-            total_stats.records_accepted /= num_queries;
-            print_spatial_query_stats("Sphere", D, target_selectivity, total_duration_ns / num_queries, total_stats);
+    // 5. --- BENCHMARK: KNN Query ---
+    {
+        print_benchmark_header("KNN", D, target_selectivity);
+        size_t k = target_records_in_query;
+        for (int i = 0; i < num_queries; ++i) {
+            const auto& center = query_centers[i];
+
+            QueryStats query_stats;
+            auto start = std::chrono::high_resolution_clock::now();
+            std::vector<void*> results = tree.query_knn(center.data(), k, &query_stats);
+            auto end = std::chrono::high_resolution_clock::now();
+            long long duration_ns = std::chrono::duration_cast<std::chrono::nanoseconds>(end - start).count();
+
+            // Correctness Test
+            std::vector<std::pair<double, std::vector<uint64_t>>> sorted_points;
+            for (const auto& p : ground_truth_points) {
+                sorted_points.push_back({SpatialKeywords::PointDistSq(p.data(), center.data(), D), p});
+            }
+            std::sort(sorted_points.begin(), sorted_points.end(), [](const auto& a, const auto& b) {
+                return a.first < b.first;
+            });
+            std::set<std::vector<uint64_t>> brute_force_results;
+            for (size_t j = 0; j < k && j < sorted_points.size(); ++j) {
+                brute_force_results.insert(sorted_points[j].second);
+            }
+            std::set<std::vector<uint64_t>> tree_results;
+            for (void* handle : results) {
+                StaxRecord* record = stax_alloc.get_ptr<StaxRecord>(StaxTree16::get_offset(reinterpret_cast<uint64_t>(handle)));
+                std::vector<uint64_t> coords(D);
+                SpatialKeywords::get_coords_from_apk(record->get_key(), coords.data(), D);
+                tree_results.insert(coords);
+            }
+            bool correct = (tree_results == brute_force_results);
+            print_query_stats_row(duration_ns, query_stats, brute_force_results.size(), correct, tree_results, brute_force_results);
         }
     }
 }
 
 int main() {
     std::cout << "--- New Expanded Spatial Query Benchmarks ---" << std::endl;
-    run_spatial_workload("2D Uniform", 2, 20000, 100, 0.01);
-    run_spatial_workload("3D Uniform", 3, 20000, 100, 0.01);
-    run_spatial_workload("4D Uniform", 4, 20000, 100, 0.01);
-    run_spatial_workload("8D Uniform", 8, 20000, 100, 0.01);
+    run_spatial_workload("2D Uniform", 2, 20000, 10, 0.01); // Reduced queries for faster debug cycle
+    run_spatial_workload("3D Uniform", 3, 20000, 10, 0.01);
+    run_spatial_workload("4D Uniform", 4, 20000, 10, 0.01);
+    run_spatial_workload("8D Uniform", 8, 20000, 10, 0.01);
+    run_spatial_workload("1024D Uniform", 1024, 1000, 10, 0.01);
     return 0;
 }

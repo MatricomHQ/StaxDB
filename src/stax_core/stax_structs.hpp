@@ -7,7 +7,7 @@
 #include <array>
 
 // Maximum dimensions supported by the spatial index.
-constexpr size_t STAX_MAX_DIMENSIONS = 128;
+constexpr size_t STAX_MAX_DIMENSIONS = 1024;
 
 // This file contains the core data structures for the StaxDB PATRICIA trie.
 // It is included by both the main tree implementation and the dimensional cursor,

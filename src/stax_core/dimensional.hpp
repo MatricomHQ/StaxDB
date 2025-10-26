@@ -28,15 +28,16 @@ inline int get_nibble_from_fragment(const uint8_t* fragment_bytes, uint8_t nibbl
     return (nibble_idx % 2 == 0) ? (byte >> 4) & 0x0F : byte & 0x0F;
 }
 
-template <typename Cursor>
-inline void refine_box_with_fragment(
-    AABB& box,
-    const uint8_t* fragment_bytes,
-    uint8_t fragment_len_nibbles,
-    uint32_t key_nibble_offset,
-    uint32_t D,
-    Cursor* cursor
-);
+// This function was logically flawed and has been removed.
+// template <typename Cursor>
+// inline void refine_box_with_fragment(
+//     AABB& box,
+//     const uint8_t* fragment_bytes,
+//     uint8_t fragment_len_nibbles,
+//     uint32_t key_nibble_offset,
+//     uint32_t D,
+//     Cursor* cursor
+// );
 
 
 namespace SpatialKeywords {
@@ -86,16 +87,22 @@ inline void get_coords_from_apk(std::string_view apk, uint64_t* coords, uint32_t
 }
 
 inline long double PointDistSq(const uint64_t* p1, const uint64_t* p2, uint32_t D) {
-    long double total_dist = 0.0L;
+    long double total_dist_sq = 0.0L;
+    const long double max_val = static_cast<long double>(std::numeric_limits<uint64_t>::max());
     for (uint32_t i = 0; i < D; ++i) {
-        long double d = static_cast<long double>(p1[i]) - static_cast<long double>(p2[i]);
-        total_dist += d * d;
+        long double p1_d = static_cast<long double>(p1[i]);
+        long double p2_d = static_cast<long double>(p2[i]);
+        long double diff = p1_d - p2_d;
+        long double scaled_diff = diff / max_val;
+        total_dist_sq += scaled_diff * scaled_diff;
     }
-    return total_dist;
+    return total_dist_sq;
 }
 
+
 inline long double distance_to_box_sq(const uint64_t* point, const AABB& box, uint32_t D) {
-    long double dist_sq = 0.0L;
+    long double total_dist_sq = 0.0L;
+    const long double max_val = static_cast<long double>(std::numeric_limits<uint64_t>::max());
     for (uint32_t i = 0; i < D; ++i) {
         long double d = 0.0L;
         if (point[i] < box.min_bounds[i]) {
@@ -103,9 +110,10 @@ inline long double distance_to_box_sq(const uint64_t* point, const AABB& box, ui
         } else if (point[i] > box.max_bounds[i]) {
             d = static_cast<long double>(point[i]) - static_cast<long double>(box.max_bounds[i]);
         }
-        dist_sq += d * d;
+        long double scaled_d = d / max_val;
+        total_dist_sq += scaled_d * scaled_d;
     }
-    return dist_sq;
+    return total_dist_sq;
 }
 
 } // namespace SpatialKeywords

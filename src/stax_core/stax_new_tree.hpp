@@ -453,24 +453,23 @@ inline std::vector<void*> StaxTree16::query_box(const AABB& query_box, QueryStat
 
         InternalNode* node = allocator_.get_ptr<InternalNode>(get_offset(current.node_ptr));
 
-        AABB fragment_aabb = current.aabb;
-        refine_box_with_fragment(fragment_aabb, (const uint8_t*)node->get_fragment_data(), node->fragment_len * 2, current.key_nibble_offset, D_, (StaxCursor<StaxTree16>*)nullptr);
-
-        if (!aabbs_intersect(fragment_aabb, query_box)) {
+        // The node's fragment is not interleaved and cannot be used to refine the AABB.
+        // The AABB is only refined by the interleaved nibble branch choices.
+        if (!aabbs_intersect(current.aabb, query_box)) {
             continue;
         }
 
-        uint32_t child_key_nibble_offset = current.key_nibble_offset + (node->fragment_len * 2);
+        uint32_t test_idx = get_test_idx(current.node_ptr);
 
         for (int i = 0; i < 16; ++i) {
             uint64_t child_ptr = node->children[i].load(std::memory_order_acquire);
             if (child_ptr == 0) continue;
 
-            AABB child_aabb = fragment_aabb;
-            refine_box_for_nibble(child_aabb, child_key_nibble_offset, i, D_, (StaxCursor<StaxTree16>*)nullptr);
+            AABB child_aabb = current.aabb;
+            refine_box_for_nibble(child_aabb, test_idx, i, D_, (StaxCursor<StaxTree16>*)nullptr);
 
             if (aabbs_intersect(child_aabb, query_box)) {
-                stack.push_back({child_ptr, child_aabb, child_key_nibble_offset + 1});
+                stack.push_back({child_ptr, child_aabb, 0}); // key_nibble_offset is not used in this simplified traversal
             }
         }
     }
@@ -511,11 +510,10 @@ inline std::vector<void*> StaxTree16::query_sphere(const uint64_t* center, long 
 
 inline std::vector<void*> StaxTree16::query_knn(const uint64_t* query_point, int k, QueryStats* stats) const {
     if (k <= 0) return {};
+    if (stats) *stats = {};
 
     std::string center_key = SpatialKeywords::generate_apk(query_point, D_);
 
-    // Priority queue to store the k nearest neighbors found so far.
-    // The pair stores <distance_sq, handle>. The queue is a max-heap, so the furthest of the k nearest is always at the top.
     using ResultPair = std::pair<long double, void*>;
     std::priority_queue<ResultPair> best_results;
 
@@ -523,66 +521,84 @@ inline std::vector<void*> StaxTree16::query_knn(const uint64_t* query_point, int
     auto backward_cursor = create_cursor("", center_key, true);
 
     forward_cursor->seek_first();
-    backward_cursor->seek_last(); // Note: seek_last is not fully implemented yet, but this is the structure.
+    backward_cursor->seek_last();
 
     bool forward_pruned = false;
     bool backward_pruned = false;
 
-    while ((forward_cursor->is_valid() && !forward_pruned) || (backward_cursor->is_valid() && !backward_pruned)) {
+    while (true) {
+        bool forward_can_scan = forward_cursor->is_valid() && !forward_pruned;
+        bool backward_can_scan = backward_cursor->is_valid() && !backward_pruned;
+
+        if (!forward_can_scan && !backward_can_scan) break;
+
+        if (stats) stats->nodes_visited++;
 
         long double current_max_dist_sq = (best_results.size() == static_cast<size_t>(k)) ? best_results.top().first : -1.0L;
 
-        // --- Process Forward Cursor ---
-        if (forward_cursor->is_valid() && !forward_pruned) {
-            const AABB* box = forward_cursor->get_current_aabb();
-            if (current_max_dist_sq >= 0 && SpatialKeywords::distance_to_box_sq(query_point, *box, D_) > current_max_dist_sq) {
+        long double f_dist = std::numeric_limits<long double>::max();
+        if (forward_can_scan) {
+            f_dist = SpatialKeywords::distance_to_box_sq(query_point, *forward_cursor->get_current_aabb(), D_);
+            if (current_max_dist_sq >= 0 && f_dist > current_max_dist_sq) {
                 forward_pruned = true;
-            } else {
-                void* handle = forward_cursor->get_record_handle();
-                StaxRecord* record = allocator_.get_ptr<StaxRecord>(get_offset(reinterpret_cast<uint64_t>(handle)));
-                std::vector<uint64_t> coords(D_);
-                SpatialKeywords::get_coords_from_apk(record->get_key(), coords.data(), D_);
-                long double dist_sq = SpatialKeywords::PointDistSq(coords.data(), query_point, D_);
-
-                if (best_results.size() < static_cast<size_t>(k)) {
-                    best_results.push({dist_sq, handle});
-                } else if (dist_sq < best_results.top().first) {
-                    best_results.pop();
-                    best_results.push({dist_sq, handle});
-                }
-                forward_cursor->move_next();
+                forward_can_scan = false;
             }
         }
 
-        // --- Process Backward Cursor ---
-        if (backward_cursor->is_valid() && !backward_pruned) {
-             const AABB* box = backward_cursor->get_current_aabb();
-             if (current_max_dist_sq >= 0 && SpatialKeywords::distance_to_box_sq(query_point, *box, D_) > current_max_dist_sq) {
+        long double b_dist = std::numeric_limits<long double>::max();
+        if (backward_can_scan) {
+            b_dist = SpatialKeywords::distance_to_box_sq(query_point, *backward_cursor->get_current_aabb(), D_);
+            if (current_max_dist_sq >= 0 && b_dist > current_max_dist_sq) {
                 backward_pruned = true;
-            } else {
-                void* handle = backward_cursor->get_record_handle();
-                StaxRecord* record = allocator_.get_ptr<StaxRecord>(get_offset(reinterpret_cast<uint64_t>(handle)));
-                std::vector<uint64_t> coords(D_);
-                SpatialKeywords::get_coords_from_apk(record->get_key(), coords.data(), D_);
-                long double dist_sq = SpatialKeywords::PointDistSq(coords.data(), query_point, D_);
-                if (best_results.size() < static_cast<size_t>(k)) {
-                    best_results.push({dist_sq, handle});
-                } else if (dist_sq < best_results.top().first) {
-                    best_results.pop();
-                    best_results.push({dist_sq, handle});
-                }
-                backward_cursor->move_prev();
+                backward_can_scan = false;
             }
         }
-        if(forward_pruned && backward_pruned) break;
+
+        if (forward_can_scan && (!backward_can_scan || f_dist <= b_dist)) {
+            if (stats) stats->leaves_visited++;
+            void* handle = forward_cursor->get_record_handle();
+            StaxRecord* record = allocator_.get_ptr<StaxRecord>(get_offset(reinterpret_cast<uint64_t>(handle)));
+            if (stats) stats->records_loaded++;
+            std::vector<uint64_t> coords(D_);
+            SpatialKeywords::get_coords_from_apk(record->get_key(), coords.data(), D_);
+            if (stats) stats->records_scanned++;
+            long double dist_sq = SpatialKeywords::PointDistSq(coords.data(), query_point, D_);
+
+            if (best_results.size() < static_cast<size_t>(k)) {
+                best_results.push({dist_sq, handle});
+            } else if (dist_sq < best_results.top().first) {
+                best_results.pop();
+                best_results.push({dist_sq, handle});
+            }
+            forward_cursor->move_next();
+        } else if (backward_can_scan) {
+            if (stats) stats->leaves_visited++;
+            void* handle = backward_cursor->get_record_handle();
+            StaxRecord* record = allocator_.get_ptr<StaxRecord>(get_offset(reinterpret_cast<uint64_t>(handle)));
+            if (stats) stats->records_loaded++;
+            std::vector<uint64_t> coords(D_);
+            SpatialKeywords::get_coords_from_apk(record->get_key(), coords.data(), D_);
+            if (stats) stats->records_scanned++;
+            long double dist_sq = SpatialKeywords::PointDistSq(coords.data(), query_point, D_);
+
+            if (best_results.size() < static_cast<size_t>(k)) {
+                best_results.push({dist_sq, handle});
+            } else if (dist_sq < best_results.top().first) {
+                best_results.pop();
+                best_results.push({dist_sq, handle});
+            }
+            backward_cursor->move_prev();
+        }
     }
 
     std::vector<void*> results;
+    results.reserve(best_results.size());
     while(!best_results.empty()) {
         results.push_back(best_results.top().second);
         best_results.pop();
     }
     std::reverse(results.begin(), results.end());
+    if (stats) stats->records_accepted = results.size();
     return results;
 }
 

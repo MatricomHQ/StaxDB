@@ -35,25 +35,15 @@ void StaxCursor<Tree>::seek_first() {
             stack_.push_back({p.node_ptr, p.nibble_in_parent, aabb_change_log_size_, key_nibble_offset});
 
             if (track_aabb_) {
-                refine_box_with_fragment(
-                    *current_aabb_,
-                    (const uint8_t*)node->get_fragment_data(),
-                    node->fragment_len * 2,
-                    key_nibble_offset,
-                    tree_->get_dimensionality(), this
-                );
+                // The fragment is not interleaved and cannot be used to refine the AABB.
                 if (p.nibble_in_parent != -1) {
                     refine_box_for_nibble(
                         *current_aabb_,
-                        key_nibble_offset + node->fragment_len * 2,
+                        StaxTree16::get_test_idx(p.node_ptr), // Use parent's test_idx
                         p.nibble_in_parent,
                         tree_->get_dimensionality(), this
                     );
                 }
-            }
-            key_nibble_offset += node->fragment_len * 2;
-            if (p.nibble_in_parent != -1) {
-                key_nibble_offset++;
             }
         }
         current_record_handle_ = reinterpret_cast<void*>(path->leaf_handle);
@@ -78,9 +68,9 @@ void StaxCursor<Tree>::seek_last() {
     uint32_t key_nibble_offset = 0;
 
     while (current_ptr != 0 && !StaxTree16::is_leaf(current_ptr)) {
-        if (track_aabb_ && last_nibble != -1) {
-            refine_box_for_nibble(*current_aabb_, key_nibble_offset, last_nibble, tree_->get_dimensionality(), this);
-            key_nibble_offset++;
+         if (track_aabb_ && last_nibble != -1) {
+            uint32_t test_idx = StaxTree16::get_test_idx(stack_.back().node_ptr);
+            refine_box_for_nibble(*current_aabb_, test_idx, last_nibble, tree_->get_dimensionality(), this);
         }
         stack_.push_back({current_ptr, last_nibble, aabb_change_log_size_, key_nibble_offset});
 
@@ -120,32 +110,30 @@ void StaxCursor<Tree>::move_next() {
         stack_.pop_back();
 
         InternalNode* parent_node = tree_->get_allocator().template get_ptr<InternalNode>(StaxTree16::get_offset(last_frame.node_ptr));
+        uint32_t parent_test_idx = StaxTree16::get_test_idx(last_frame.node_ptr);
 
         for (int nibble = last_frame.nibble_in_parent + 1; nibble < 16; ++nibble) {
             uint64_t child_ptr = parent_node->children[nibble].load(std::memory_order_acquire);
             if (child_ptr != 0) {
-                uint32_t key_nibble_offset = last_frame.key_nibble_offset;
-                stack_.push_back({last_frame.node_ptr, nibble, aabb_change_log_size_, key_nibble_offset});
+                if (track_aabb_) {
+                    refine_box_for_nibble(*current_aabb_, parent_test_idx, nibble, tree_->get_dimensionality(), this);
+                }
+                stack_.push_back({last_frame.node_ptr, nibble, aabb_change_log_size_, 0});
 
                 uint64_t current_ptr = child_ptr;
 
                 while (!StaxTree16::is_leaf(current_ptr)) {
                     InternalNode* node = tree_->get_allocator().template get_ptr<InternalNode>(StaxTree16::get_offset(current_ptr));
-                    CursorFrame& current_frame = stack_.back();
-
-                    if (track_aabb_) {
-                        refine_box_with_fragment(*current_aabb_, (const uint8_t*)node->get_fragment_data(), node->fragment_len * 2, current_frame.key_nibble_offset, tree_->get_dimensionality(), this);
-                    }
-                    current_frame.key_nibble_offset += node->fragment_len * 2;
+                    uint32_t current_test_idx = StaxTree16::get_test_idx(current_ptr);
 
                     bool found_child = false;
                     for (int i = 0; i < 16; ++i) {
                         uint64_t next_ptr = node->children[i].load(std::memory_order_acquire);
                         if (next_ptr != 0) {
                             if (track_aabb_) {
-                                refine_box_for_nibble(*current_aabb_, current_frame.key_nibble_offset, i, tree_->get_dimensionality(), this);
+                                refine_box_for_nibble(*current_aabb_, current_test_idx, i, tree_->get_dimensionality(), this);
                             }
-                            stack_.push_back({current_ptr, i, aabb_change_log_size_, current_frame.key_nibble_offset + 1});
+                            stack_.push_back({current_ptr, i, aabb_change_log_size_, 0});
                             current_ptr = next_ptr;
                             found_child = true;
                             break;
@@ -181,32 +169,30 @@ void StaxCursor<Tree>::move_prev() {
         stack_.pop_back();
 
         InternalNode* parent_node = tree_->get_allocator().template get_ptr<InternalNode>(StaxTree16::get_offset(last_frame.node_ptr));
+        uint32_t parent_test_idx = StaxTree16::get_test_idx(last_frame.node_ptr);
 
         for (int nibble = last_frame.nibble_in_parent - 1; nibble >= 0; --nibble) {
             uint64_t child_ptr = parent_node->children[nibble].load(std::memory_order_acquire);
             if (child_ptr != 0) {
-                uint32_t key_nibble_offset = last_frame.key_nibble_offset;
-                stack_.push_back({last_frame.node_ptr, nibble, aabb_change_log_size_, key_nibble_offset});
+                 if (track_aabb_) {
+                    refine_box_for_nibble(*current_aabb_, parent_test_idx, nibble, tree_->get_dimensionality(), this);
+                }
+                stack_.push_back({last_frame.node_ptr, nibble, aabb_change_log_size_, 0});
 
                 uint64_t current_ptr = child_ptr;
 
                 while (!StaxTree16::is_leaf(current_ptr)) {
                     InternalNode* node = tree_->get_allocator().template get_ptr<InternalNode>(StaxTree16::get_offset(current_ptr));
-                    CursorFrame& current_frame = stack_.back();
-
-                    if (track_aabb_) {
-                        refine_box_with_fragment(*current_aabb_, (const uint8_t*)node->get_fragment_data(), node->fragment_len * 2, current_frame.key_nibble_offset, tree_->get_dimensionality(), this);
-                    }
-                    current_frame.key_nibble_offset += node->fragment_len * 2;
+                    uint32_t current_test_idx = StaxTree16::get_test_idx(current_ptr);
 
                     bool found_child = false;
                     for (int i = 15; i >= 0; --i) {
                         uint64_t next_ptr = node->children[i].load(std::memory_order_acquire);
                         if (next_ptr != 0) {
                              if (track_aabb_) {
-                                refine_box_for_nibble(*current_aabb_, current_frame.key_nibble_offset, i, tree_->get_dimensionality(), this);
+                                refine_box_for_nibble(*current_aabb_, current_test_idx, i, tree_->get_dimensionality(), this);
                             }
-                            stack_.push_back({current_ptr, i, aabb_change_log_size_, current_frame.key_nibble_offset + 1});
+                            stack_.push_back({current_ptr, i, aabb_change_log_size_, 0});
                             current_ptr = next_ptr;
                             found_child = true;
                             break;
@@ -321,19 +307,4 @@ inline void refine_box_for_nibble(AABB& box, uint32_t key_nibble_offset, int nib
 
     box.min_bounds[dim_idx] = std::max(box.min_bounds[dim_idx], min_for_nibble);
     box.max_bounds[dim_idx] = std::min(box.max_bounds[dim_idx], max_for_nibble);
-}
-
-template <typename Cursor>
-inline void refine_box_with_fragment(
-    AABB& box,
-    const uint8_t* fragment_bytes,
-    uint8_t fragment_len_nibbles,
-    uint32_t key_nibble_offset,
-    uint32_t D,
-    Cursor* cursor
-) {
-    for (uint8_t i = 0; i < fragment_len_nibbles; ++i) {
-        int nibble = get_nibble_from_fragment(fragment_bytes, i);
-        refine_box_for_nibble(box, key_nibble_offset + i, nibble, D, cursor);
-    }
 }
