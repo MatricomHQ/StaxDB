@@ -14,7 +14,7 @@
 
 class FlexDoc {
 public:
-    FlexDoc(DataView raw_data); 
+    FlexDoc(DataView raw_data);
     std::optional<std::string_view> get_field(std::string_view field_name) const;
     bool is_valid() const { return data_.data != nullptr && data_.len > 0; }
 

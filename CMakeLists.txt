@@ -70,6 +70,7 @@ set_target_properties(stax_common PROPERTIES POSITION_INDEPENDENT_CODE ON)
 
 # --- Stax Block 1: The Core Engine (Header-Only INTERFACE library) ---
 add_library(stax_core INTERFACE)
+target_include_directories(stax_core INTERFACE src)
 target_link_libraries(stax_core INTERFACE stax_common)
 
 
@@ -86,7 +87,7 @@ add_library(stax_db STATIC
     src/stax_db/query.cpp
     src/stax_db/statistics.cpp
 )
-target_link_libraries(stax_db PUBLIC stax_tx stax_common)
+target_link_libraries(stax_db PUBLIC stax_tx)
 set_target_properties(stax_db PROPERTIES POSITION_INDEPENDENT_CODE ON)
 
 
@@ -103,56 +104,51 @@ add_library(staxdb_api_lib SHARED
     src/stax_api/staxdb_api.cpp
 )
 set_target_properties(staxdb_api_lib PROPERTIES OUTPUT_NAME "staxdb")
-# staxdb_api uses symbols from stax_graph (for global_id_map) and stax_db (for global_transaction_factory)
-# and needs to link against them directly to resolve these symbols.
-target_link_libraries(staxdb_api_lib PRIVATE stax_graph stax_db)
+target_link_libraries(staxdb_api_lib PRIVATE stax_graph stax_db stax_common)
 
 
 # --- NEW: INTERFACE Library for Node.js Addon ---
-# This target doesn't build anything itself. It exists to define the
-# necessary include paths for an external build system like node-gyp.
 add_library(stax_node_api INTERFACE)
-target_include_directories(stax_node_api INTERFACE
-    src
-)
-# The node addon will depend on the headers from all these components.
-target_link_libraries(stax_node_api INTERFACE stax_graph stax_db stax_tx stax_core stax_common)
-
-
-# --- New StaxCore Library ---
-add_library(staxcore STATIC
-    staxcore/src/staxcore.cpp
-)
-target_include_directories(staxcore PUBLIC
-    $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/staxcore/include>
-    $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/staxcore/src>
-)
-set_target_properties(staxcore PROPERTIES POSITION_INDEPENDENT_CODE ON)
-target_link_libraries(staxcore PUBLIC Threads::Threads)
+target_include_directories(stax_node_api INTERFACE src)
+target_link_libraries(stax_node_api INTERFACE stax_graph)
 
 
 # --- New StaxCore Benchmark Executable ---
-add_executable(stax_core_benchmark
-    staxcore/bench/stax_benchmark.cpp
-)
-target_link_libraries(stax_core_benchmark PRIVATE staxcore)
+add_executable(stax_core_benchmark staxcore/bench/stax_benchmark.cpp)
+target_link_libraries(stax_core_benchmark PRIVATE stax_core stax_common)
 
 if(UNIX AND NOT APPLE)
     target_link_libraries(stax_core_benchmark PRIVATE rt)
 endif()
 
+# --- Test Runner Executable ---
+add_executable(stax_tests src/tests/dimensional_test.cpp)
+target_link_libraries(stax_tests PRIVATE stax_db stax_core)
+
 
 # --- Benchmark Runner Executable ---
-add_executable(stax_benchmark
-    src/main.cpp
-    src/benchmarks/tpcc.cpp
-
-)
-target_link_libraries(stax_benchmark PRIVATE stax_graph stax_common)
+add_executable(stax_benchmark src/main.cpp src/benchmarks/tpcc.cpp)
+target_link_libraries(stax_benchmark PRIVATE stax_graph stax_db stax_common)
 
 if(UNIX AND NOT APPLE)
-    target_link_libraries(stax_benchmark PRIVATE rt) # Linked to stax_benchmark
+    target_link_libraries(stax_benchmark PRIVATE rt)
 endif()
+
+
+
+# --- Dimensional Benchmark Runner Executable ---
+add_executable(stax_dimensional_benchmark
+    src/benchmarks/dimensional_benchmark.cpp
+)
+target_link_libraries(stax_dimensional_benchmark PRIVATE stax_db stax_core)
+
+
+# --- Spatial Query Benchmark Runner Executable ---
+add_executable(stax_spatial_query_benchmark
+    src/benchmarks/spatial_query_bench.cpp
+)
+target_link_libraries(stax_spatial_query_benchmark PRIVATE stax_db stax_core)
+
 
 # Removed separate executables for TCP server and client.
 # Their source files are now part of stax_benchmark.

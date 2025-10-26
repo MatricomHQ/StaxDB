@@ -783,10 +783,16 @@ std::optional<RecordData> Collection::get(const TxnContext &ctx, std::string_vie
     {
         if (collection_idx_ < gen_ptr->owned_collections.size() && gen_ptr->owned_collections[collection_idx_])
         {
-            auto result = gen_ptr->owned_collections[collection_idx_]->get_tree().get(ctx, key);
-            if (result.has_value())
+            StaxRecord* result = gen_ptr->owned_collections[collection_idx_]->get_tree().get(ctx, key);
+            if (result)
             {
-                return result;
+                return RecordData{
+                    result->get_key_data(),
+                    result->key_len,
+                    result->get_value_data(),
+                    result->value_len,
+                    result->is_deleted
+                };
             }
         }
     }

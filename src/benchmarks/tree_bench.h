@@ -103,7 +103,7 @@ inline void run_tree_stress_test() {
             TxnContext ctx = {2, 2, thread_idx}; 
             for (const auto& item : thread_data[thread_idx]) {
                 auto res = tree.get(ctx, item.key); 
-                if (res && res->value_view() == item.value) {
+                if (res && std::string_view(res->get_value_data(), res->value_len) == item.value) {
                     total_hits++;
                 } else {
                     total_misses++;

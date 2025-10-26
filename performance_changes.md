@@ -1,25 +1,34 @@
 # Performance Changes
 
-This document tracks the performance changes resulting from the refactoring of the `INSERT` operation.
+## Before
 
-## Baseline Performance
+| Workload | Lat (ns/op) | ns/item | Nodes Visited | Leaves Visited | Recs Loaded | Recs Scanned | Recs Accepted | Efficiency |
+|---|---|---|---|---|---|---|---|---|
+| Box Query (2D) | 1398875 | 344 | 5866 | 4400 | 4400 | 4400 | 4066 | 0.924 |
+| Sphere Query (2D) | 1301315 | 332 | 5866 | 4400 | 4400 | 4066 | 3909 | 0.961 |
+| Box Query (3D) | 4482242 | 411 | 17114 | 12800 | 12800 | 12800 | 10884 | 0.850 |
+| Sphere Query (3D) | 4174676 | 440 | 17114 | 12800 | 12800 | 10884 | 9470 | 0.870 |
+| Box Query (4D) | 2409291 | 156 | 21674 | 16200 | 16200 | 16200 | 15429 | 0.952 |
+| Sphere Query (4D) | 2547859 | 189 | 21674 | 16200 | 16200 | 15429 | 13414 | 0.869 |
+| Box Query (8D) | 3173199 | 163 | 25885 | 19400 | 19400 | 19400 | 19362 | 0.998 |
+| Sphere Query (8D) | 3441817 | 201 | 25885 | 19400 | 19400 | 19362 | 17047 | 0.880 |
 
-The following metrics were captured before any changes were made to the codebase.
+## After
 
-| Benchmark                                    | StaxTree (ns/op) |
-| -------------------------------------------- | ---------------- |
-| Lexicographical 8-byte Insert (Random)       | 330              |
-| Lexicographical 8-byte Get (Random)          | 107              |
-| Avg. Insert Latency (Short Sequential Keys)  | 286              |
-| Avg. Get (Hit) Latency (Short Sequential Keys) | 94               |
-
-## Performance After Refactor
-
-The following metrics were captured after refactoring the `InternalNode` structure and `insert` method.
-
-| Benchmark                                    | Before (ns/op) | After (ns/op) | Improvement |
-| -------------------------------------------- | -------------- | ------------- | ----------- |
-| Lexicographical 8-byte Insert (Random)       | 330            | 287           | **13.03%**  |
-| Lexicographical 8-byte Get (Random)          | 107            | 92            | **14.02%**  |
-| Avg. Insert Latency (Short Sequential Keys)  | 286            | 271           | **5.24%**   |
-| Avg. Get (Hit) Latency (Short Sequential Keys) | 94             | 95            | **-1.06%**  |
+| Workload | Lat (ns/op) | ns/item | Nodes Visited | Leaves Visited | Recs Loaded | Recs Scanned | Recs Accepted | Efficiency |
+|---|---|---|---|---|---|---|---|---|
+| Box Query (2D) | 277258 | 199 | 1 | 2551 | 2547 | 2547 | 1389 | 0.545 |
+| Sphere Query (2D) | 409949 | 255 | 1 | 2975 | 2971 | 1826 | 1605 | 0.879 |
+| KNN Query (2D) | 103361 | 516 | 369 | 502 | 500 | 500 | 200 | 0.400 |
+| Box Query (3D) | 1192841 | 127 | 1 | 11462 | 11454 | 11454 | 9389 | 0.820 |
+| Sphere Query (3D) | 2151055 | 213 | 1 | 14429 | 14422 | 12357 | 10079 | 0.816 |
+| KNN Query (3D) | 89167 | 445 | 369 | 369 | 367 | 367 | 200 | 0.545 |
+| Box Query (4D) | 1141462 | 118 | 1 | 10648 | 10641 | 10641 | 9620 | 0.904 |
+| Sphere Query (4D) | 3200970 | 239 | 1 | 17667 | 17661 | 16640 | 13381 | 0.804 |
+| KNN Query (4D) | 149078 | 745 | 345 | 345 | 343 | 343 | 200 | 0.583 |
+| Box Query (8D) | 40079 | 210 | 1 | 215 | 212 | 212 | 190 | 0.896 |
+| Sphere Query (8D) | 4923187 | 271 | 1 | 21297 | 21297 | 21274 | 18163 | 0.854 |
+| KNN Query (8D) | 103678 | 518 | 259 | 259 | 257 | 257 | 200 | 0.778 |
+| Box Query (1024D) | 3311 | 0 | 1 | 2 | 0 | 0 | 0 | 0.000 |
+| Sphere Query (1024D) | 325639911 | 1713894 | 1 | 21298 | 21298 | 21298 | 190 | 0.009 |
+| KNN Query (1024D) | 410921231 | 2054606 | 21965 | 21965 | 21965 | 21965 | 200 | 0.009 |
