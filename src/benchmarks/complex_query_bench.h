@@ -226,7 +226,7 @@ inline void run_aggregation_benchmark(std::unique_ptr<::Database>& db, const Com
             for(size_t i = t; i < data.order_line_amounts.size(); i+=num_threads) {
                 std::string key_str = "order_lines:" + std::to_string(i);
                 if (auto res = thread_orders_col.get(ctx, key_str)) {
-                    double amount = std::stod(std::string(res->value_view()));
+                    double amount = std::stod(std::string(std::string_view(res->get_value_data(), res->value_len)));
                     thread_local_totals[t][data.order_line_amounts[i].first] += amount;
                 }
             }

@@ -234,7 +234,7 @@ std::optional<DataView> GraphReader::get_property_for_object_direct(uint32_t obj
     auto result = ofv_col_->get(ctx_, key);
     if (result && result->value_len > 0)
     {
-        return DataView(result->value_ptr, result->value_len);
+        return DataView(result->get_value_data(), result->value_len);
     }
     return std::nullopt;
 }
@@ -541,7 +541,7 @@ bool GraphReader::has_relationship(uint32_t source_obj_id, std::string_view rela
     key_buf[key_len++] = KEY_SEPARATOR;
     key_len += to_binary_key_buf(target_obj_id, key_buf + key_len, sizeof(key_buf) - key_len);
     std::string_view key(key_buf, key_len);
-    return ofv_col_->get(ctx_, key).has_value();
+    return ofv_col_->get(ctx_, key) != nullptr;
 }
 
 static const char FVO_PLACEHOLDER_VALUE = '1';

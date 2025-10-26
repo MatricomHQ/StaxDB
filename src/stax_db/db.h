@@ -80,7 +80,7 @@ public:
 
     void insert(const TxnContext &ctx, TransactionBatch &batch, std::string_view key, std::string_view value);
     void remove(const TxnContext &ctx, TransactionBatch &batch, std::string_view key);
-    std::optional<RecordData> get(const TxnContext &ctx, std::string_view key);
+    StaxRecord* get(const TxnContext &ctx, std::string_view key);
 
     void insert_sync_direct(std::string_view key, std::string_view value, size_t thread_id);
     void remove_sync_direct(std::string_view key, size_t thread_id);

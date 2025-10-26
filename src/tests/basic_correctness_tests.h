@@ -85,11 +85,11 @@ void run_durability_test() {
         Collection& users_col_read = db->get_collection_by_idx(users_collection_idx);
         TxnContext users_read_ctx = users_col_read.begin_transaction_context(0, true); 
         auto user_res = users_col_read.get(users_read_ctx, "user:1");
-        if (!user_res.has_value() || user_res->value_view() != "kris") {
-            std::cerr << "FAIL: Durability Phase 2 - user:1 value mismatch. Expected 'kris', got '" << (user_res ? std::string(user_res->value_view()) : "NOT_FOUND") << "'." << std::endl;
+        if (!user_res || std::string_view(user_res->get_value_data(), user_res->value_len) != "kris") {
+            std::cerr << "FAIL: Durability Phase 2 - user:1 value mismatch. Expected 'kris', got '" << (user_res ? std::string(std::string_view(user_res->get_value_data(), user_res->value_len)) : "NOT_FOUND") << "'." << std::endl;
             test_passed = false;
         }
-        if (users_col_read.get(users_read_ctx, "order:101").has_value()) {
+        if (users_col_read.get(users_read_ctx, "order:101")) {
             std::cerr << "FAIL: Durability Phase 2 - order:101 found in users collection." << std::endl;
             test_passed = false;
         }
@@ -98,11 +98,11 @@ void run_durability_test() {
         Collection& orders_col_read = db->get_collection_by_idx(orders_collection_idx);
         TxnContext orders_read_ctx = orders_col_read.begin_transaction_context(0, true); 
         auto order_res = orders_col_read.get(orders_read_ctx, "order:101");
-        if (!order_res.has_value() || order_res->value_view() != "product_a") { 
-            std::cerr << "FAIL: Durability Phase 2 - order:101 value mismatch. Expected 'product_a', got '" << (order_res ? std::string(order_res->value_view()) : "NOT_FOUND") << "'." << std::endl;
+        if (!order_res || std::string_view(order_res->get_value_data(), order_res->value_len) != "product_a") {
+            std::cerr << "FAIL: Durability Phase 2 - order:101 value mismatch. Expected 'product_a', got '" << (order_res ? std::string(std::string_view(order_res->get_value_data(), order_res->value_len)) : "NOT_FOUND") << "'." << std::endl;
             test_passed = false;
         }
-        if (orders_col_read.get(orders_read_ctx, "user:1").has_value()) {
+        if (orders_col_read.get(orders_read_ctx, "user:1")) {
             std::cerr << "FAIL: Durability Phase 2 - user:1 found in orders collection." << std::endl;
             test_passed = false;
         }
@@ -138,8 +138,8 @@ void run_durability_test() {
         Collection& users_col_final = db->get_collection_by_idx(users_collection_idx);
         TxnContext users_final_ctx = users_col_final.begin_transaction_context(0, true); 
         auto user_res = users_col_final.get(users_final_ctx, "user:1");
-        if (!user_res.has_value() || user_res->value_view() != "kris_updated") {
-            std::cerr << "FAIL: Durability Phase 4 - user:1 value mismatch. Expected 'kris_updated', got '" << (user_res ? std::string(user_res->value_view()) : "NOT_FOUND") << "'." << std::endl;
+        if (!user_res || std::string_view(user_res->get_value_data(), user_res->value_len) != "kris_updated") {
+            std::cerr << "FAIL: Durability Phase 4 - user:1 value mismatch. Expected 'kris_updated', got '" << (user_res ? std::string(std::string_view(user_res->get_value_data(), user_res->value_len)) : "NOT_FOUND") << "'." << std::endl;
             test_passed = false;
         }
         
@@ -147,8 +147,8 @@ void run_durability_test() {
         Collection& orders_col_final = db->get_collection_by_idx(orders_collection_idx);
         TxnContext orders_final_ctx = orders_col_final.begin_transaction_context(0, true); 
         auto order_res = orders_col_final.get(orders_final_ctx, "order:101");
-        if (!order_res.has_value() || order_res->value_view() != "product_a") { 
-            std::cerr << "FAIL: Durability Phase 4 - order:101 not found or value mismatch. Expected 'product_a', got '" << (order_res ? std::string(order_res->value_view()) : "NOT_FOUND") << "'." << std::endl;
+        if (!order_res || std::string_view(order_res->get_value_data(), order_res->value_len) != "product_a") {
+            std::cerr << "FAIL: Durability Phase 4 - order:101 not found or value mismatch. Expected 'product_a', got '" << (order_res ? std::string(std::string_view(order_res->get_value_data(), order_res->value_len)) : "NOT_FOUND") << "'." << std::endl;
             test_passed = false;
         }
         
@@ -205,11 +205,11 @@ void run_basic_correctness_test() {
     Collection& col1_ref_read = db->get_collection_by_idx(col1_idx);
     TxnContext ctx3 = col1_ref_read.begin_transaction_context(0, true); 
     auto res_user = col1_ref_read.get(ctx3, "users:kris");
-    if (!res_user.has_value() || res_user->value_view() != "kris_payload") {
-        std::cerr << "FAIL: Basic Correctness - users:kris value mismatch. Expected 'kris_payload', got '" << (res_user ? std::string(res_user->value_view()) : "NOT_FOUND") << "'." << std::endl;
+    if (!res_user || std::string_view(res_user->get_value_data(), res_user->value_len) != "kris_payload") {
+        std::cerr << "FAIL: Basic Correctness - users:kris value mismatch. Expected 'kris_payload', got '" << (res_user ? std::string(std::string_view(res_user->get_value_data(), res_user->value_len)) : "NOT_FOUND") << "'." << std::endl;
         test_passed = false;
     }
-    if (col1_ref_read.get(ctx3, "orders:101").has_value()) {
+    if (col1_ref_read.get(ctx3, "orders:101")) {
         std::cerr << "FAIL: Basic Correctness - orders:101 found in users collection." << std::endl;
         test_passed = false;
     }
@@ -218,11 +218,11 @@ void run_basic_correctness_test() {
     Collection& col2_ref_read = db->get_collection_by_idx(col2_idx);
     TxnContext ctx4 = col2_ref_read.begin_transaction_context(0, true); 
     auto res_order = col2_ref_read.get(ctx4, "orders:101");
-    if (!res_order.has_value() || res_order->value_view() != "order_101_payload") {
-        std::cerr << "FAIL: Basic Correctness - orders:101 value mismatch. Expected 'order_101_payload', got '" << (res_order ? std::string(res_order->value_view()) : "NOT_FOUND") << "'." << std::endl;
+    if (!res_order || std::string_view(res_order->get_value_data(), res_order->value_len) != "order_101_payload") {
+        std::cerr << "FAIL: Basic Correctness - orders:101 value mismatch. Expected 'order_101_payload', got '" << (res_order ? std::string(std::string_view(res_order->get_value_data(), res_order->value_len)) : "NOT_FOUND") << "'." << std::endl;
         test_passed = false;
     }
-    if (col2_ref_read.get(ctx4, "users:kris").has_value()) {
+    if (col2_ref_read.get(ctx4, "users:kris")) {
         std::cerr << "FAIL: Basic Correctness - users:kris found in orders collection." << std::endl;
         test_passed = false;
     }

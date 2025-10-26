@@ -200,7 +200,7 @@ inline void run_db_mixed_workload(std::unique_ptr<::Database>& db, size_t num_th
                 const std::string& key = it->first;
                 const std::string& expected_value = it->second;
                 auto res = col.get(ctx, key);
-                if (!res || res->value_view() != expected_value) {
+                if (!res || std::string_view(res->get_value_data(), res->value_len) != expected_value) {
                     verification_errors.fetch_add(1, std::memory_order_relaxed);
                     std::lock_guard<std::mutex> lock(failed_verifications_mutex);
                     failed_verifications.push_back({key, expected_value});
@@ -226,9 +226,9 @@ inline void run_db_mixed_workload(std::unique_ptr<::Database>& db, size_t num_th
             const std::string& key = failed_pair.first;
             const std::string& expected_value = failed_pair.second;
             auto res = col.get(re_verify_ctx, key);
-            if (!res || res->value_view() != expected_value) {
+            if (!res || std::string_view(res->get_value_data(), res->value_len) != expected_value) {
                 still_failed_count++;
-                std::cerr << "    [RE-VERIFY FAILED] Key: '" << key << "'. Expected: '" << expected_value << "'. Got: '" << (res ? std::string(res->value_view()) : "NOT_FOUND") << "'" << std::endl;
+                std::cerr << "    [RE-VERIFY FAILED] Key: '" << key << "'. Expected: '" << expected_value << "'. Got: '" << (res ? std::string(std::string_view(res->get_value_data(), res->value_len)) : "NOT_FOUND") << "'" << std::endl;
             }
         }
         

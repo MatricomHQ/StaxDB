@@ -83,7 +83,7 @@ inline void run_ffi_style_benchmark(::Database* db) {
 
     for (int i = 0; i < num_items; ++i) {
         auto res = col.get(get_ctx, data[i].Key); 
-        if (!res || res->value_view() != data[i].Value) {
+        if (!res || std::string_view(res->get_value_data(), res->value_len) != data[i].Value) {
             std::cerr << "Get failed or value mismatch for key: " << data[i].Key << std::endl;
         }
     }

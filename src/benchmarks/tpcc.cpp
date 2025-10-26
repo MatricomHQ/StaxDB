@@ -155,7 +155,7 @@ public:
 
         auto next_o_id_opt = col.get(ctx, district_key(w_id, d_id, "next_o_id"));
         if(!next_o_id_opt) { col.abort(ctx); return; } 
-        int32_t o_id = std::stoi(std::string(next_o_id_opt->value_view()));
+        int32_t o_id = std::stoi(std::string(std::string_view(next_o_id_opt->get_value_data(), next_o_id_opt->value_len)));
 
         col.insert(ctx, batch, district_key(w_id, d_id, "next_o_id"), std::to_string(o_id + 1));
         col.insert(ctx, batch, order_key(w_id, d_id, o_id, "id"), std::to_string(o_id));
@@ -170,7 +170,7 @@ public:
 
             auto stock_quantity_opt = col.get(ctx, stock_key(w_id, i_id, "quantity"));
             if(!stock_quantity_opt) { col.abort(ctx); return; } 
-            int32_t s_quantity = std::stoi(std::string(stock_quantity_opt->value_view()));
+            int32_t s_quantity = std::stoi(std::string(std::string_view(stock_quantity_opt->get_value_data(), stock_quantity_opt->value_len)));
 
             
             if(s_quantity > 10) s_quantity += random_.uniform_int(1, 10); 

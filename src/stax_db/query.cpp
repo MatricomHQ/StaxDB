@@ -221,7 +221,7 @@ std::vector<FlexDoc> QueryBuilder::execute()
 
                 if (auto record_data = col.get(ctx, std::string_view(doc_key_buffer, len)))
                 {
-                    results.emplace_back(DataView(record_data->value_ptr, record_data->value_len));
+                    results.emplace_back(DataView(record_data->get_value_data(), record_data->value_len));
                     retrieved_count++;
                 }
             }

@@ -777,20 +777,20 @@ void Collection::remove(const TxnContext &ctx, TransactionBatch &batch, std::str
     batch.logical_item_count_delta--;
 }
 
-std::optional<RecordData> Collection::get(const TxnContext &ctx, std::string_view key)
+StaxRecord* Collection::get(const TxnContext &ctx, std::string_view key)
 {
     for (const auto &gen_ptr : parent_db_->get_generations())
     {
         if (collection_idx_ < gen_ptr->owned_collections.size() && gen_ptr->owned_collections[collection_idx_])
         {
             auto result = gen_ptr->owned_collections[collection_idx_]->get_tree().get(ctx, key);
-            if (result.has_value())
+            if (result)
             {
                 return result;
             }
         }
     }
-    return std::nullopt;
+    return nullptr;
 }
 
 void Collection::insert_sync_direct(std::string_view key, std::string_view value, size_t thread_id)

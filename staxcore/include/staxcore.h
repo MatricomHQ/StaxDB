@@ -71,18 +71,8 @@ typedef struct {
 } stax_slice_t;
 
 stax_status_t stax_put(stax_db_t* db, const stax_slice_t* key, const stax_slice_t* value);
-
-// WARNING: The pointer returned in `value->data` is a direct view into the database's
-// internal memory. It is NOT safe to use this pointer after the transaction in which
-// it was fetched has ended, or after any subsequent write operations. Do NOT modify
-// the data pointed to by this pointer. For long-term use, copy the data into your
-// own buffer.
 stax_status_t stax_get(stax_db_t* db, const stax_slice_t* key, stax_slice_t* value);
 stax_status_t stax_delete(stax_db_t* db, const stax_slice_t* key);
-
-// Note: For values returned by `stax_get`, this function is a no-op as the memory
-// is managed by the database. For user-allocated slices, this function must be
-// called to free the `data` member.
 void stax_free_slice(stax_slice_t* value);
 
 

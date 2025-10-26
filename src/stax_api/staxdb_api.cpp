@@ -216,8 +216,8 @@ StaxOptionalSlice staxdb_get(StaxDB db, StaxCollection collection_idx, StaxSlice
         Collection& col = db->db->get_collection_by_idx(collection_idx);
         TxnContext ctx = col.begin_transaction_context(0, true);
         auto record = col.get(ctx, to_string_view(key));
-        if (record.has_value()) {
-            value_buffer.assign(record->value_ptr, record->value_len);
+        if (record) {
+            value_buffer.assign(record->get_value_data(), record->value_len);
             return {{value_buffer.data(), value_buffer.length()}, true};
         }
         return {{nullptr, 0}, false};

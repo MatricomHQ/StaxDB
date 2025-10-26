@@ -245,9 +245,9 @@ inline void run_throughput_suite(const std::string& suite_name, size_t num_items
                 auto res = col.get(ctx, item.key); 
                 
                 if (res) {
-                    if (item.key.length() != res->key_len || std::string_view(res->key_ptr, res->key_len) != item.key) {
+                    if (item.key.length() != res->key_len || std::string_view(res->get_key_data(), res->key_len) != item.key) {
                         std::cerr << "!!! ERROR: Key mismatch for queried key: '" << item.key << "'. "
-                                  << "Retrieved key: '" << std::string_view(res->key_ptr, res->key_len) << "'" << std::endl;
+                                  << "Retrieved key: '" << std::string_view(res->get_key_data(), res->key_len) << "'" << std::endl;
                     }
                     total_hits.fetch_add(1, std::memory_order_relaxed);
                     total_get_bytes.fetch_add(item.actual_stored_size_bytes, std::memory_order_relaxed);
@@ -332,7 +332,7 @@ inline void run_throughput_suite(const std::string& suite_name, size_t num_items
             TxnContext ctx = col.begin_transaction_context(thread_idx, true); 
             for (const auto& item : s_thread_data[thread_idx]) {
                 auto res = col.get(ctx, item.key);
-                if (!res || res->value_view() != item.value) {
+                if (!res || std::string_view(res->get_value_data(), res->value_len) != item.value) {
                     verification_errors.fetch_add(1, std::memory_order_relaxed);
                 }
             }

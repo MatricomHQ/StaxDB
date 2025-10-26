@@ -61,22 +61,6 @@ struct TxnContext {
 #define STAX_ALWAYS_INLINE inline
 #endif
 
-STAX_ALWAYS_INLINE void simd_memcpy(void* dest, const void* src, size_t n) {
-    char* d = static_cast<char*>(dest);
-    const char* s = static_cast<const char*>(src);
-    size_t i = 0;
-
-#if defined(__AVX2__)
-    while (n - i >= 32) {
-        __m256i v = _mm256_loadu_si256((const __m256i*)(s + i));
-        _mm256_storeu_si256((__m256i*)(d + i), v);
-        i += 32;
-    }
-#endif
-
-    memcpy(d + i, s + i, n - i);
-}
-
 // =================================================================================================
 // --- StaxAllocator (Unified mmap Allocator) ---
 // =================================================================================================
@@ -129,7 +113,7 @@ private:
     uint64_t current_alloc_ptr_ = 0;
     uint64_t arena_end_ptr_ = 0;
 
-    static constexpr size_t ARENA_SIZE = 64 * 1024;
+    static constexpr size_t ARENA_SIZE = 32 * 1024;
 
     void request_new_arena() {
         arena_offset_ = global_allocator_.allocate(ARENA_SIZE, ARENA_SIZE); // Align arenas

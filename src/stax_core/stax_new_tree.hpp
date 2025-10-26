@@ -200,7 +200,7 @@ public:
     void insert(ThreadLocalAllocator& local_alloc, const TxnContext &ctx, std::string_view key, std::string_view value, bool is_delete = false);
     void range_scan(const TxnContext &ctx, std::string_view start_key, std::string_view end_key, std::vector<StaxRecord*>& results) const;
     StaxRecord* get_visible_record(StaxRecord* record_head, const TxnContext& ctx) const;
-    std::optional<RecordData> get(const TxnContext &ctx, std::string_view key) const;
+    StaxRecord* get(const TxnContext &ctx, std::string_view key) const;
 
     void remove(ThreadLocalAllocator& local_alloc, const TxnContext &ctx, std::string_view key) {
         insert(local_alloc, ctx, key, "", true);
@@ -212,7 +212,7 @@ public:
         }
     }
 
-    void multi_get_simd(const TxnContext& ctx, const std::vector<std::string_view>& keys, std::vector<std::optional<RecordData>>& results) const {
+    void multi_get_simd(const TxnContext& ctx, const std::vector<std::string_view>& keys, std::vector<StaxRecord*>& results) const {
         results.resize(keys.size());
         for (size_t i = 0; i < keys.size(); ++i) {
             results[i] = get(ctx, keys[i]);
@@ -485,24 +485,15 @@ inline StaxRecord* StaxTree16::get_visible_record(StaxRecord* record_head, const
     return nullptr;
 }
 
-inline std::optional<RecordData> StaxTree16::get(const TxnContext &ctx, std::string_view key) const {
+inline StaxRecord* StaxTree16::get(const TxnContext &ctx, std::string_view key) const {
     uint64_t current_ptr = root_ptr_.load(std::memory_order_acquire);
     while (current_ptr != 0) {
         if (is_leaf(current_ptr)) {
             StaxRecord* record_head = allocator_.get_ptr<StaxRecord>(get_offset(current_ptr));
             if (record_head->get_key() == key) {
-                StaxRecord* visible_record = get_visible_record(record_head, ctx);
-                if (visible_record) {
-                    return RecordData{
-                        visible_record->get_key_data(),
-                        visible_record->key_len,
-                        visible_record->get_value_data(),
-                        visible_record->value_len,
-                        visible_record->is_deleted
-                    };
-                }
+                return get_visible_record(record_head, ctx);
             }
-            return std::nullopt;
+            return nullptr;
         } else {
             uint32_t test_idx = get_test_idx(current_ptr);
             int nibble = get_nibble_at(key, test_idx);
@@ -510,5 +501,5 @@ inline std::optional<RecordData> StaxTree16::get(const TxnContext &ctx, std::str
             current_ptr = node->children[nibble].load(std::memory_order_acquire);
         }
     }
-    return std::nullopt;
+    return nullptr;
 }
