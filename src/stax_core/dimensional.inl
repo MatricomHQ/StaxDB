@@ -49,39 +49,70 @@ void StaxCursor<Tree>::seek_first() {
 
 template<typename Tree>
 void StaxCursor<Tree>::seek_last() {
-    // A proper implementation would find the key <= end_key and then right-most descend if needed.
-    // This simplified version just does a full right-most descent.
+    // Correctly seeks to the greatest key <= end_key_.
     stack_.clear();
     aabb_change_log_size_ = 0;
-    uint64_t current_ptr = tree_->get_root_ptr().load(std::memory_order_acquire);
-    int last_nibble = -1;
-    uint32_t key_nibble_offset = 0;
+    current_record_handle_ = nullptr;
+    if (track_aabb_) {
+        current_aabb_ = std::make_unique<AABB>(tree_->get_dimensionality());
+    }
 
-    while (current_ptr != 0 && !StaxTree16::is_leaf(current_ptr)) {
-        if (track_aabb_ && last_nibble != -1) {
-            refine_box_for_nibble(*current_aabb_, key_nibble_offset, last_nibble, tree_->get_dimensionality(), this);
+    // Use find_path_for_seek to find the first key >= end_key_. This gives us a starting point.
+    std::optional<StaxPath> path_opt = tree_->find_path_for_seek(end_key_, true);
+
+    if (!path_opt) {
+        // Case A: No keys are >= end_key_. All keys are < end_key_.
+        // We want the absolute last key, which requires a full right-most descent.
+        uint64_t current_ptr = tree_->get_root_ptr().load(std::memory_order_acquire);
+        if (current_ptr == 0) return; // Empty tree.
+
+        int nibble_in_parent = -1;
+        uint32_t key_nibble_offset = 0;
+
+        while (!StaxTree16::is_leaf(current_ptr)) {
+            InternalNode* node = tree_->get_allocator().template get_ptr<InternalNode>(StaxTree16::get_offset(current_ptr));
+            bool found_child = false;
+            for (int i = 15; i >= 0; --i) { // Scan right-to-left
+                uint64_t next_ptr = node->children[i].load(std::memory_order_acquire);
+                if (next_ptr != 0) {
+                    if (track_aabb_) {
+                        refine_box_for_nibble(*current_aabb_, key_nibble_offset, i, tree_->get_dimensionality(), this);
+                    }
+                    stack_.push_back({current_ptr, i, aabb_change_log_size_, key_nibble_offset + 1});
+                    current_ptr = next_ptr;
+                    found_child = true;
+                    break;
+                }
+            }
+            if (!found_child) { current_record_handle_ = nullptr; return; }
             key_nibble_offset++;
         }
-        stack_.push_back({current_ptr, last_nibble, aabb_change_log_size_, key_nibble_offset});
-
-        InternalNode* node = tree_->get_allocator().template get_ptr<InternalNode>(StaxTree16::get_offset(current_ptr));
-        bool found = false;
-        for(int i=15; i>=0; --i) {
-            uint64_t next_ptr = node->children[i].load(std::memory_order_acquire);
-            if (next_ptr != 0) {
-                last_nibble = i;
-                current_ptr = next_ptr;
-                found = true;
-                break;
+        current_record_handle_ = reinterpret_cast<void*>(current_ptr);
+    } else {
+        // Case B: A key >= end_key_ was found. Position the cursor there.
+        StaxPath& path = *path_opt;
+        uint32_t key_nibble_offset = 0;
+        for (const auto& frame : path.frames) {
+            if (track_aabb_ && frame.nibble_in_parent != -1) {
+                refine_box_for_nibble(*current_aabb_, key_nibble_offset, frame.nibble_in_parent, tree_->get_dimensionality(), this);
+                key_nibble_offset++;
             }
+            stack_.push_back({frame.node_ptr, frame.nibble_in_parent, aabb_change_log_size_, key_nibble_offset});
         }
-        if (!found) { current_record_handle_ = nullptr; return; }
+        current_record_handle_ = reinterpret_cast<void*>(path.leaf_handle);
+
+        // If the found key is > end_key_, the one we want is the one just before it.
+        StaxRecord* record = tree_->get_allocator().template get_ptr<StaxRecord>(StaxTree16::get_offset(path.leaf_handle));
+        if (record->get_key() > end_key_) {
+            move_prev();
+        }
     }
-    current_record_handle_ = reinterpret_cast<void*>(current_ptr);
-    if(is_valid()){
+
+    // Final check: the resulting key must not be less than the cursor's start_key_.
+    if (is_valid()) {
         StaxRecord* record = tree_->get_allocator().template get_ptr<StaxRecord>(StaxTree16::get_offset(reinterpret_cast<uint64_t>(current_record_handle_)));
-        if(record->get_key() < start_key_){
-             current_record_handle_ = nullptr;
+        if (record->get_key() < start_key_) {
+            current_record_handle_ = nullptr;
         }
     }
 }

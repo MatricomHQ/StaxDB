@@ -183,11 +183,114 @@ void run_spatial_workload(
             print_spatial_query_stats("Sphere", D, target_selectivity, total_duration_ns / num_queries, total_stats);
         }
     }
+
+    // 5. --- CORRECTNESS: Box Query ---
+    {
+        bool all_tests_passed = true;
+        std::cout << "\n--- Box Query Correctness Test (" << D << "D) ---" << std::endl;
+
+        for (int i = 0; i < num_queries; ++i) {
+            const auto& center = query_centers[i];
+            auto radius = static_cast<uint64_t>(query_radii[i]);
+            AABB query_box(D);
+            for(uint32_t d=0; d<D; ++d) {
+                query_box.min_bounds[d] = (center[d] > radius) ? center[d] - radius : 0;
+                query_box.max_bounds[d] = (center[d] < std::numeric_limits<uint64_t>::max() - radius) ? center[d] + radius : std::numeric_limits<uint64_t>::max();
+            }
+
+            // A. Get results from the StaxDB Box Query
+            QueryStats box_stats;
+            std::vector<void*> box_results_handles = tree.query_box(query_box, box_stats);
+
+            // B. Get results from a brute-force linear scan (ground truth)
+            std::vector<std::vector<uint64_t>> brute_force_results_coords;
+            for (const auto& p_original : inserted_points) {
+                std::string apk = SpatialKeywords::generate_apk(p_original.data(), D);
+                std::vector<uint64_t> p_reconstructed(D);
+                SpatialKeywords::get_coords_from_apk(apk, p_reconstructed.data(), D);
+                bool in_box = true;
+                for(uint32_t d=0; d<D; ++d) {
+                    if (p_reconstructed[d] < query_box.min_bounds[d] || p_reconstructed[d] > query_box.max_bounds[d]) {
+                        in_box = false;
+                        break;
+                    }
+                }
+                if (in_box) {
+                    brute_force_results_coords.push_back(p_reconstructed);
+                }
+            }
+
+            // C. Compare the results
+            bool test_passed = (box_results_handles.size() == brute_force_results_coords.size());
+
+            if (!test_passed) {
+                all_tests_passed = false;
+                std::cerr << "  [FAIL] Box Correctness test failed for query #" << i
+                          << " | Expected: " << brute_force_results_coords.size()
+                          << ", Got: " << box_results_handles.size() << std::endl;
+            } else {
+                 std::cout << "  [PASS] Box Correctness test passed for query #" << i
+                           << " | Expected: " << brute_force_results_coords.size()
+                           << ", Got: " << box_results_handles.size() << std::endl;
+            }
+        }
+         if (all_tests_passed) {
+            std::cout << "--- ALL BOX CORRECTNESS TESTS PASSED ---" << std::endl;
+        } else {
+            std::cerr << "--- SOME BOX CORRECTNESS TESTS FAILED ---" << std::endl;
+        }
+    }
+
+    // 6. --- CORRECTNESS: Sphere Query ---
+    {
+        bool all_tests_passed = true;
+        std::cout << "\n--- Sphere Query Correctness Test (" << D << "D) ---" << std::endl;
+
+        for (int i = 0; i < num_queries; ++i) {
+            const auto& center = query_centers[i];
+            long double radius = query_radii[i];
+            long double radius_sq = radius * radius;
+
+            // A. Get results from the StaxDB Sphere Query
+            QueryStats sphere_stats;
+            std::vector<void*> sphere_results_handles = tree.query_sphere(center.data(), radius, sphere_stats);
+
+            // B. Get results from a brute-force linear scan (ground truth)
+            std::vector<std::vector<uint64_t>> brute_force_results_coords;
+            for (const auto& p_original : inserted_points) {
+                std::string apk = SpatialKeywords::generate_apk(p_original.data(), D);
+                std::vector<uint64_t> p_reconstructed(D);
+                SpatialKeywords::get_coords_from_apk(apk, p_reconstructed.data(), D);
+                if (SpatialKeywords::PointDistSq(p_reconstructed.data(), center.data(), D) <= radius_sq) {
+                    brute_force_results_coords.push_back(p_reconstructed);
+                }
+            }
+
+            // C. Compare the results
+            bool test_passed = (sphere_results_handles.size() == brute_force_results_coords.size());
+
+            if (!test_passed) {
+                all_tests_passed = false;
+                std::cerr << "  [FAIL] Sphere Correctness test failed for query #" << i
+                          << " | Expected: " << brute_force_results_coords.size()
+                          << ", Got: " << sphere_results_handles.size() << std::endl;
+            } else {
+                 std::cout << "  [PASS] Sphere Correctness test passed for query #" << i
+                           << " | Expected: " << brute_force_results_coords.size()
+                           << ", Got: " << sphere_results_handles.size() << std::endl;
+            }
+        }
+         if (all_tests_passed) {
+            std::cout << "--- ALL SPHERE CORRECTNESS TESTS PASSED ---" << std::endl;
+        } else {
+            std::cerr << "--- SOME SPHERE CORRECTNESS TESTS FAILED ---" << std::endl;
+        }
+    }
     // 5. --- CORRECTNESS: KNN Query ---
     {
         int k = 10; // Number of neighbors to find for the test
         bool all_tests_passed = true;
-        int tests_to_run = std::min(10, num_queries); // Run on a subset of queries for speed
+        int tests_to_run = num_queries; // Run on all queries
 
         std::cout << "\n--- KNN Query Correctness Test (" << D << "D, k=" << k << ") ---" << std::endl;
 
@@ -271,7 +374,9 @@ void run_spatial_workload(
                 // --- END DEBUG LOGGING ---
 
             } else {
-                 std::cout << "  [PASS] KNN Correctness test passed for query #" << i << std::endl;
+                 std::cout << "  [PASS] KNN Correctness test passed for query #" << i
+                           << " | Expected: " << brute_force_results_coords.size()
+                           << ", Got: " << knn_results_coords.size() << std::endl;
             }
         }
          if (all_tests_passed) {
@@ -315,7 +420,7 @@ void run_spatial_workload(
 }
 
 int main() {
-    std::cout << "--- New Expanded Spatial Query Benchmarks ---" << std::endl;
+    std.cout << "--- New Expanded Spatial Query Benchmarks ---" << std::endl;
     run_spatial_workload("2D Uniform", 2, 20000, 100, 0.01);
     run_spatial_workload("3D Uniform", 3, 20000, 100, 0.01);
     run_spatial_workload("4D Uniform", 4, 20000, 100, 0.01);
