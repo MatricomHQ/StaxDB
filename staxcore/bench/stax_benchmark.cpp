@@ -1,5 +1,9 @@
-#include "stax_internal.h"
+#include "stax_core/stax_new_tree.hpp"
 #include <iostream>
+#include <optional>
+#include <unistd.h>
+#include <fcntl.h>
+#include <sys/mman.h>
 #include <vector>
 #include <string>
 #include <string_view>
@@ -54,7 +58,7 @@ public:
     }
     StaxRecord* st_get(std::string_view key) {
         TxnContext ctx = {0, std::numeric_limits<uint64_t>::max(), 1};
-        return tree_->get(ctx, key, key.length());
+        return tree_->get(ctx, key);
     }
 };
 #else
@@ -73,10 +77,10 @@ public:
         if (mmap_ptr_ == MAP_FAILED) throw std::runtime_error("mmap failed");
         file_header_ = new (mmap_ptr_) FileHeader();
         file_header_->global_alloc_offset.store(sizeof(FileHeader), std::memory_order_relaxed);
-        file_header_->root_ptr.store(0, std::memory_order_relaxed);
+        file_header_->collection_array_offset = 0;
         global_allocator_ = std::make_unique<StaxAllocator>(file_header_, static_cast<uint8_t*>(mmap_ptr_));
         st_local_allocator_ = std::make_unique<ThreadLocalAllocator>(*global_allocator_);
-        tree_ = std::make_unique<StaxTree16>(*global_allocator_, file_header_->root_ptr);
+        tree_ = std::make_unique<StaxTree16>(*global_allocator_, reinterpret_cast<std::atomic<uint64_t>&>(file_header_->collection_array_offset));
     }
     ~FractalTreeWrapper() {
         if (mmap_ptr_ != MAP_FAILED && mmap_ptr_ != nullptr) munmap(mmap_ptr_, mmap_size_);
@@ -90,10 +94,26 @@ public:
     }
     StaxRecord* st_get(std::string_view key) {
         TxnContext ctx = {0, std::numeric_limits<uint64_t>::max(), 1};
-        return tree_->get(ctx, key, key.length());
+        return tree_->get(ctx, key);
     }
 };
 #endif
+
+// =================================================================================================
+// --- Transparent Comparators for std::unordered_map ---
+// =================================================================================================
+struct StringViewHash {
+    using is_transparent = void;
+    std::size_t operator()(std::string_view sv) const {
+        return std::hash<std::string_view>{}(sv);
+    }
+};
+struct StringViewEqual {
+    using is_transparent = void;
+    bool operator()(std::string_view lhs, std::string_view rhs) const {
+        return lhs == rhs;
+    }
+};
 
 // =================================================================================================
 // --- LEX BENCHMARKS ---
@@ -162,7 +182,7 @@ void run_unordered_map_benchmark(size_t key_bytes) {
     constexpr size_t NUM_OPS = 1000000;
     std::string name = "Unordered_Map " + std::to_string(key_bytes) + "-byte";
 
-    std::unordered_map<std::string, std::string> umap;
+    std::unordered_map<std::string, std::string, StringViewHash, StringViewEqual> umap;
     std::vector<uint64_t> keys(NUM_OPS);
     for(size_t i=0; i<NUM_OPS; ++i) keys[i] = i;
     if(is_random) {
@@ -175,7 +195,7 @@ void run_unordered_map_benchmark(size_t key_bytes) {
     auto start_insert = std::chrono::high_resolution_clock::now();
     for(size_t i=0; i<NUM_OPS; ++i) {
         make_lex_key(keys[i], key_buf.data(), key_bytes);
-        umap[std::string(key_buf.data(), key_bytes)] = "v";
+        umap.emplace(std::string(key_buf.data(), key_bytes), "v");
     }
     auto end_insert = std::chrono::high_resolution_clock::now();
     auto dur_insert = std::chrono::duration_cast<std::chrono::nanoseconds>(end_insert - start_insert);
@@ -188,7 +208,7 @@ void run_unordered_map_benchmark(size_t key_bytes) {
     auto start_get = std::chrono::high_resolution_clock::now();
     for(size_t i=0; i<NUM_OPS; ++i) {
         make_lex_key(keys[i], key_buf.data(), key_bytes);
-        if(umap.find(std::string(key_buf.data(), key_bytes)) == umap.end()) { /* error */ }
+        if(umap.find(std::string_view(key_buf.data(), key_bytes)) == umap.end()) { /* error */ }
     }
     auto end_get = std::chrono::high_resolution_clock::now();
     auto dur_get = std::chrono::duration_cast<std::chrono::nanoseconds>(end_get - start_get);
@@ -310,7 +330,7 @@ template <typename T>
 void do_not_optimize(T const& value) {
     asm volatile("" : : "r,m"(value) : "memory");
 }
-void verify_tree_contents(StaxTree16* tree, const std::vector<std::string>& expected_keys_sorted) {
+void verify_tree_contents(StaxTree16* tree, const std::vector<std::string_view>& expected_keys_sorted) {
     std::cout << "[VERIFY] Performing full scan to check " << expected_keys_sorted.size() << " items..." << std::endl;
     auto start_time = std::chrono::high_resolution_clock::now();
     TxnContext ctx = {0, std::numeric_limits<uint64_t>::max(), 1};
@@ -335,14 +355,34 @@ void verify_tree_contents(StaxTree16* tree, const std::vector<std::string>& expe
     }
     std::cout << "[VERIFY] All " << results.size() << " items successfully verified." << std::endl;
 }
-void run_latency_test_for_keyset(const std::string& name, const std::vector<std::string>& keys, const std::vector<std::string>& shuffled_keys) {
+
+void run_latency_test_for_keyset(
+    const std::string& name,
+    const std::vector<std::string_view>& keys,
+    const std::vector<std::string_view>& shuffled_keys)
+{
     const int total_items = keys.size();
     std::cout << "\n" << std::string(60, '-') << std::endl;
     std::cout << "--- Latency Test: " << name << " (" << total_items << " items) ---" << std::endl;
     std::cout << std::string(60, '-') << std::endl;
-    std::vector<std::string> miss_keys;
+
+    // --- Prepare Miss Keys ---
+    size_t miss_keys_total_size = 0;
+    for (const auto& key : keys) {
+        miss_keys_total_size += (5 + key.size());
+    }
+    std::vector<char> miss_keys_buffer;
+    miss_keys_buffer.reserve(miss_keys_total_size);
+    std::vector<std::string_view> miss_keys;
     miss_keys.reserve(total_items);
-    for (const auto& key : keys) miss_keys.push_back("miss_" + key);
+    for (const auto& key : keys) {
+        const char prefix[] = "miss_";
+        size_t current_pos = miss_keys_buffer.size();
+        miss_keys_buffer.insert(miss_keys_buffer.end(), prefix, prefix + 5);
+        miss_keys_buffer.insert(miss_keys_buffer.end(), key.begin(), key.end());
+        miss_keys.emplace_back(miss_keys_buffer.data() + current_pos, 5 + key.size());
+    }
+
     {
         std::cout << "\n[StaxTree16]" << std::endl;
         FractalTreeWrapper tree; TxnContext ctx = {0, std::numeric_limits<uint64_t>::max(), 1};
@@ -355,7 +395,7 @@ void run_latency_test_for_keyset(const std::string& name, const std::vector<std:
         verify_tree_contents(tree.get_tree(), keys);
         start_time = std::chrono::high_resolution_clock::now();
         for (const auto& key : shuffled_keys) {
-            StaxRecord* rec = tree.get_tree()->get(ctx, key, key.length()); do_not_optimize(rec); assert(rec != nullptr);
+            StaxRecord* rec = tree.get_tree()->get(ctx, key); do_not_optimize(rec); assert(rec != nullptr);
         }
         end_time = std::chrono::high_resolution_clock::now();
         total_duration = std::chrono::duration_cast<std::chrono::nanoseconds>(end_time - start_time);
@@ -363,7 +403,7 @@ void run_latency_test_for_keyset(const std::string& name, const std::vector<std:
         std::cout << std::left << std::setw(30) << "Avg. Get (Hit) Latency" << ": " << avg_ns << " ns/op" << std::endl;
         start_time = std::chrono::high_resolution_clock::now();
         for (const auto& key : miss_keys) {
-            StaxRecord* rec = tree.get_tree()->get(ctx, key, key.length()); do_not_optimize(rec); assert(rec == nullptr);
+            StaxRecord* rec = tree.get_tree()->get(ctx, key); do_not_optimize(rec); assert(rec == nullptr);
         }
         end_time = std::chrono::high_resolution_clock::now();
         total_duration = std::chrono::duration_cast<std::chrono::nanoseconds>(end_time - start_time);
@@ -372,9 +412,9 @@ void run_latency_test_for_keyset(const std::string& name, const std::vector<std:
     }
     {
         std::cout << "\n[std::map]" << std::endl;
-        std::map<std::string, std::string> stl_map;
+        std::map<std::string, std::string, std::less<>> stl_map;
         auto start_time = std::chrono::high_resolution_clock::now();
-        for (const auto& key : shuffled_keys) stl_map[key] = "v";
+        for (const auto& key : shuffled_keys) stl_map.emplace(key, "v");
         auto end_time = std::chrono::high_resolution_clock::now();
         auto total_duration = std::chrono::duration_cast<std::chrono::nanoseconds>(end_time - start_time);
         long long avg_ns = total_duration.count() / total_items;
@@ -398,9 +438,9 @@ void run_latency_test_for_keyset(const std::string& name, const std::vector<std:
     }
     {
         std::cout << "\n[std::unordered_map]" << std::endl;
-        std::unordered_map<std::string, std::string> stl_umap;
+        std::unordered_map<std::string, std::string, StringViewHash, StringViewEqual> stl_umap;
         auto start_time = std::chrono::high_resolution_clock::now();
-        for (const auto& key : shuffled_keys) stl_umap[key] = "v";
+        for (const auto& key : shuffled_keys) stl_umap.emplace(key, "v");
         auto end_time = std::chrono::high_resolution_clock::now();
         auto total_duration = std::chrono::duration_cast<std::chrono::nanoseconds>(end_time - start_time);
         long long avg_ns = total_duration.count() / total_items;
@@ -481,35 +521,49 @@ void run_in_depth_latency_benchmarks() {
     std::cout << "\n" << std::string(80, '=') << std::endl;
     std::cout << "--- In-Depth Point Operation Latency Benchmarks (vs STL) ---" << std::endl;
     std::cout << std::string(80, '=') << std::endl;
-    {
-        std::vector<std::string> keys; keys.reserve(total_items);
-        for (uint64_t i = 0; i < total_items; ++i) keys.push_back(std::string(reinterpret_cast<const char*>(&i), sizeof(i)));
-        std::vector<std::string> shuffled_keys = keys; std::shuffle(shuffled_keys.begin(), shuffled_keys.end(), rng);
-        std::sort(keys.begin(), keys.end());
-        run_latency_test_for_keyset("Short Sequential Keys (8 bytes)", keys, shuffled_keys);
-    }
-    {
-        std::vector<std::string> keys; keys.reserve(total_items);
+
+    auto run_test = [&](const std::string& name, size_t key_size, auto key_generator) {
+        size_t total_buffer_size = total_items * key_size;
+        std::vector<char> key_buffer(total_buffer_size);
+        std::vector<std::string_view> keys;
+        keys.reserve(total_items);
+
         for (int i = 0; i < total_items; ++i) {
-            std::string key(128, '\0'); snprintf(&key[0], 128, "lonsequential_key_%0100d", i);
-            key.resize(strlen(key.c_str())); keys.push_back(key);
+            char* key_ptr = key_buffer.data() + i * key_size;
+            key_generator(i, key_ptr, key_size);
+            keys.emplace_back(key_ptr, key_size);
         }
-        std::vector<std::string> shuffled_keys = keys; std::shuffle(shuffled_keys.begin(), shuffled_keys.end(), rng);
+
+        std::vector<std::string_view> shuffled_keys = keys;
+        std::shuffle(shuffled_keys.begin(), shuffled_keys.end(), rng);
+
+        // Sort the original string_view vector for verification
         std::sort(keys.begin(), keys.end());
-        run_latency_test_for_keyset("Long Sequential Keys (128 bytes)", keys, shuffled_keys);
-    }
-    {
-        std::vector<std::string> keys; keys.reserve(total_items);
-        std::mt19937_64 key_rng(1337);
-        for (int i = 0; i < total_items; ++i) {
-            char key_buf[64];
-            for(int j=0; j<8; ++j) reinterpret_cast<uint64_t*>(key_buf)[j] = key_rng();
-            keys.push_back(std::string(key_buf, 64));
-        }
-        std::vector<std::string> shuffled_keys = keys; std::shuffle(shuffled_keys.begin(), shuffled_keys.end(), rng);
-        std::sort(keys.begin(), keys.end());
-        run_latency_test_for_keyset("Hash-like Keys (64 bytes)", keys, shuffled_keys);
-    }
+
+        run_latency_test_for_keyset(name, keys, shuffled_keys);
+    };
+
+    // --- Short Sequential Keys ---
+    run_test("Short Sequential Keys (8 bytes)", 8,
+        [](uint64_t i, char* buf, size_t size) {
+            memcpy(buf, &i, sizeof(i));
+        });
+
+    // --- Long Sequential Keys ---
+    run_test("Long Sequential Keys (128 bytes)", 128,
+        [](int i, char* buf, size_t size) {
+            int len = snprintf(buf, size, "lonsequential_key_%0100d", i);
+            // This is unsafe if len >= size, but we control the buffer size.
+        });
+
+    // --- Hash-like Keys ---
+    std::mt19937_64 key_rng(1337);
+    run_test("Hash-like Keys (64 bytes)", 64,
+        [&](int i, char* buf, size_t size) {
+            for(size_t j=0; j < size / sizeof(uint64_t); ++j) {
+                reinterpret_cast<uint64_t*>(buf)[j] = key_rng();
+            }
+        });
 }
 void run_range_scan_benchmarks() {
     std::cout << "\n" << std::string(80, '=') << std::endl;
@@ -521,14 +575,22 @@ void run_range_scan_benchmarks() {
         {"Small Scans (10 items) ", 10}, {"Medium Scans (100 items)", 100}, {"Large Scans (1000 items)", 1000}
     };
     TxnContext scan_ctx = {0, std::numeric_limits<uint64_t>::max(), 99};
-    std::vector<std::string> keys_sorted; keys_sorted.reserve(total_items);
+
+    // --- Key Generation ---
+    const size_t key_size = 16;
+    std::vector<char> key_buffer(total_items * key_size);
+    std::vector<std::string_view> keys_sorted;
+    keys_sorted.reserve(total_items);
     for (int i = 0; i < total_items; ++i) {
-        char key_buf[16]; snprintf(key_buf, sizeof(key_buf), "user%07d", i);
-        keys_sorted.push_back(std::string(key_buf));
+        char* key_ptr = key_buffer.data() + i * key_size;
+        snprintf(key_ptr, key_size, "user%07d", i);
+        keys_sorted.emplace_back(key_ptr, strlen(key_ptr));
     }
-    std::vector<std::string> keys_shuffled = keys_sorted;
+
+    std::vector<std::string_view> keys_shuffled = keys_sorted;
     std::mt19937 rng(42);
     std::shuffle(keys_shuffled.begin(), keys_shuffled.end(), rng);
+
     {
         std::cout << "\n--- Structure: StaxTree16 ---" << std::endl;
         FractalTreeWrapper rand_tree;
@@ -558,10 +620,10 @@ void run_range_scan_benchmarks() {
     }
     {
         std::cout << "\n--- Structure: std::map ---" << std::endl;
-        std::map<std::string, std::string> stl_map;
+        std::map<std::string, std::string, std::less<>> stl_map;
         std::cout << "[SETUP] Inserting " << total_items << " random-order keys into std::map..." << std::endl;
         auto start_time = std::chrono::high_resolution_clock::now();
-        for (const auto& key : keys_shuffled) stl_map[key] = "v_rand";
+        for (const auto& key : keys_shuffled) stl_map.emplace(key, "v_rand");
         auto end_time = std::chrono::high_resolution_clock::now();
         std::cout << "[SETUP] Insertion complete in " << std::chrono::duration_cast<std::chrono::milliseconds>(end_time - start_time).count() << " ms." << std::endl;
         std::cout << "[SETUP] Warming up memory by scanning all keys..." << std::endl;
@@ -572,8 +634,8 @@ void run_range_scan_benchmarks() {
             start_time = std::chrono::high_resolution_clock::now();
             for (int i = 0; i < num_scans; ++i) {
                 int start_idx = (i * 31337) % (total_items - profile.range_size);
-                const std::string& start_key = keys_sorted[start_idx];
-                const std::string& end_key = keys_sorted[start_idx + profile.range_size - 1];
+                const auto& start_key = keys_sorted[start_idx];
+                const auto& end_key = keys_sorted[start_idx + profile.range_size - 1];
                 size_t items_found = 0;
                 auto it_start = stl_map.lower_bound(start_key);
                 for(auto it = it_start; it != stl_map.end(); ++it) {
