@@ -65,9 +65,12 @@ void run_query_benchmarks() {
     std::vector<std::vector<uint64_t>> points;
     generate_dimensional_test_data(points, NUM_ITEMS, D);
 
+    std::vector<char> key_buffer(SpatialKeywords::get_max_apk_size(D));
+
     std::cout << "[Setup] Inserting " << NUM_ITEMS << " keys..." << std::endl;
     for(const auto& p : points) {
-        tree.insert(local_alloc, BENCH_CTX, SpatialKeywords::generate_apk(p.data(), D), "");
+        size_t key_size = SpatialKeywords::generate_apk(p.data(), D, reinterpret_cast<uint8_t*>(key_buffer.data()), key_buffer.size());
+        tree.insert(local_alloc, BENCH_CTX, std::string_view(key_buffer.data(), key_size), "");
     }
 
     // --- Query Box Benchmark ---

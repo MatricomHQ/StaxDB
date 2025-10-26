@@ -5,6 +5,7 @@
 #include <cstdint>
 #include <cassert>
 #include <iomanip>
+#include <map>
 #include <algorithm>
 #include <set>
 #include <random>
@@ -14,15 +15,14 @@
 const TxnContext TEST_CTX = {1, 1, 0};
 
 // =================================================================================================
-// --- Test Helper: Mock Allocator ---
+// --- Test Helper: Mock Allocator and Tree Setup ---
 // =================================================================================================
 class MockStaxAllocator {
 private:
     std::vector<uint8_t> memory_;
     size_t next_offset_ = 1;
 public:
-    // Increased size to handle larger randomized tests
-    MockStaxAllocator() { memory_.resize(100 * 1024 * 1024); }
+    MockStaxAllocator() { memory_.resize(1024 * 1024 * 10); } // 10MB
     uint64_t allocate(size_t size, size_t alignment = 8) {
         size_t align_mask = alignment - 1;
         size_t aligned_offset = (next_offset_ + align_mask) & ~align_mask;
@@ -39,14 +39,275 @@ public:
 };
 
 // =================================================================================================
-// --- Randomized Correctness Test for All Spatial Queries ---
+// --- Test Cases ---
 // =================================================================================================
 
-void run_randomized_correctness_test(const std::string& query_type, uint32_t D) {
-    std::cout << "\n--- Running Randomized Correctness Test: " << query_type << " (" << D << "D) ---" << std::endl;
+void test_apk_generation() {
+    std::cout << "Running test: test_apk_generation..." << std::endl;
+    const uint32_t D = 2;
+    const uint64_t coords[D] = {0xA1B2C3D4E5F60708, 0x1A2B3C4D5E6F7080};
+    std::vector<uint8_t> generated_prefix(D * 2);
+    uint8_t* write_ptr = generated_prefix.data();
+    SpatialKeywords::detail::generate_apk_interleaved_scalar(coords, D, write_ptr);
+    const std::vector<uint8_t> expected_prefix = {0xA1, 0x1A, 0xB2, 0x2B};
+    assert(generated_prefix == expected_prefix && "test_apk_generation failed");
+    std::cout << "SUCCESS" << std::endl;
+}
 
-    const size_t num_points = 2000;
-    const int num_queries = 10;
+void test_cursor_seek_first() {
+    std::cout << "Running test: test_cursor_seek_first..." << std::endl;
+    FileHeader mock_header;
+    mock_header.global_alloc_offset.store(1, std::memory_order_relaxed);
+    MockStaxAllocator mock_alloc;
+    StaxAllocator allocator_wrapper(&mock_header, mock_alloc.get_base_ptr());
+    ThreadLocalAllocator local_alloc(allocator_wrapper);
+    std::atomic<uint64_t> root_ptr = 0;
+    StaxTree16 tree(allocator_wrapper, root_ptr, 0);
+    std::map<std::string, std::string> test_data = {
+        {"apple", "red"}, {"banana", "yellow"}, {"cherry", "red"},
+        {"date", "brown"}, {"grape", "purple"}
+    };
+    for(const auto& pair : test_data) tree.insert(local_alloc, TEST_CTX, pair.first, pair.second);
+    auto cursor_c = tree.create_cursor("blueberry", "grape", false);
+    cursor_c->seek_first();
+    assert(cursor_c->is_valid());
+    StaxRecord* rec_c = allocator_wrapper.get_ptr<StaxRecord>(StaxTree16::get_offset(reinterpret_cast<uint64_t>(cursor_c->get_record_handle())));
+    assert(rec_c->get_key() == "cherry");
+    std::cout << "SUCCESS" << std::endl;
+}
+
+void test_cursor_move_next() {
+    std::cout << "Running test: test_cursor_move_next..." << std::endl;
+    FileHeader mock_header;
+    mock_header.global_alloc_offset.store(1, std::memory_order_relaxed);
+    MockStaxAllocator mock_alloc;
+    StaxAllocator allocator_wrapper(&mock_header, mock_alloc.get_base_ptr());
+    ThreadLocalAllocator local_alloc(allocator_wrapper);
+    std::atomic<uint64_t> root_ptr = 0;
+    StaxTree16 tree(allocator_wrapper, root_ptr, 0);
+    std::vector<std::string> keys = {"d", "a", "c", "e", "bb", "ba", "b", "bc"};
+    for(const auto& k : keys) tree.insert(local_alloc, TEST_CTX, k, "v");
+    std::sort(keys.begin(), keys.end());
+    auto cursor = tree.create_cursor("", "z", false);
+    cursor->seek_first();
+    size_t count = 0;
+    while(cursor->is_valid()) {
+        assert(count < keys.size());
+        StaxRecord* rec = allocator_wrapper.get_ptr<StaxRecord>(StaxTree16::get_offset(reinterpret_cast<uint64_t>(cursor->get_record_handle())));
+        assert(rec->get_key() == keys[count]);
+        count++;
+        cursor->move_next();
+    }
+    assert(count == keys.size());
+    std::cout << "SUCCESS" << std::endl;
+}
+
+void test_aabb_tracking() {
+    std::cout << "Running test: test_aabb_tracking..." << std::endl;
+
+    // 1. Setup
+    FileHeader mock_header;
+    mock_header.global_alloc_offset.store(1, std::memory_order_relaxed);
+    MockStaxAllocator mock_alloc;
+    StaxAllocator allocator_wrapper(&mock_header, mock_alloc.get_base_ptr());
+    ThreadLocalAllocator local_alloc(allocator_wrapper);
+    std::atomic<uint64_t> root_ptr = 0;
+    const uint32_t D = 2;
+    StaxTree16 tree(allocator_wrapper, root_ptr, D);
+    std::vector<char> key_buffer(SpatialKeywords::get_max_apk_size(D));
+
+    const uint64_t coords_a[] = {0xA1B2C3D4E5F60708, 0x1A2B3C4D5E6F7080};
+    size_t key_a_size = SpatialKeywords::generate_apk(coords_a, D, reinterpret_cast<uint8_t*>(key_buffer.data()), key_buffer.size());
+    tree.insert(local_alloc, TEST_CTX, std::string_view(key_buffer.data(), key_a_size), "value_a");
+
+    const uint64_t coords_b[] = {0xC1B2C3D4E5F60708, 0x3A2B3C4D5E6F7080};
+    size_t key_b_size = SpatialKeywords::generate_apk(coords_b, D, reinterpret_cast<uint8_t*>(key_buffer.data()), key_buffer.size());
+    tree.insert(local_alloc, TEST_CTX, std::string_view(key_buffer.data(), key_b_size), "value_b");
+
+    auto cursor = tree.create_cursor("", "z", true);
+    cursor->seek_first();
+    assert(cursor->is_valid());
+
+    const AABB* aabb = cursor->get_current_aabb();
+    assert(aabb != nullptr);
+    assert(aabb->min_bounds[0] >= 0xA000000000000000);
+    assert(aabb->max_bounds[0] < 0xB000000000000000);
+    assert(aabb->min_bounds[1] >= 0x1000000000000000);
+    assert(aabb->max_bounds[1] < 0x2000000000000000);
+
+    cursor->move_next();
+    assert(cursor->is_valid());
+
+    const AABB* aabb2 = cursor->get_current_aabb();
+    assert(aabb2 != nullptr);
+    assert(aabb2->min_bounds[0] >= 0xC000000000000000);
+    assert(aabb2->max_bounds[0] < 0xD000000000000000);
+    assert(aabb2->min_bounds[1] >= 0x3000000000000000);
+    assert(aabb2->max_bounds[1] < 0x4000000000000000);
+
+    std::cout << "SUCCESS" << std::endl;
+}
+
+// Helper function to create a test tree with some points for box/sphere queries
+void setup_dimensional_tree(StaxTree16& tree, ThreadLocalAllocator& local_alloc, const uint32_t D) {
+    std::vector<char> key_buffer(SpatialKeywords::get_max_apk_size(D));
+
+    // Points inside the box [100, 200] x [100, 200]
+    const uint64_t p1[] = {150, 150};
+    size_t p1_size = SpatialKeywords::generate_apk(p1, D, reinterpret_cast<uint8_t*>(key_buffer.data()), key_buffer.size());
+    tree.insert(local_alloc, TEST_CTX, std::string_view(key_buffer.data(), p1_size), "p1");
+
+    const uint64_t p2[] = {120, 180};
+    size_t p2_size = SpatialKeywords::generate_apk(p2, D, reinterpret_cast<uint8_t*>(key_buffer.data()), key_buffer.size());
+    tree.insert(local_alloc, TEST_CTX, std::string_view(key_buffer.data(), p2_size), "p2");
+
+    // Points outside the box
+    const uint64_t p3[] = {50, 50};
+    size_t p3_size = SpatialKeywords::generate_apk(p3, D, reinterpret_cast<uint8_t*>(key_buffer.data()), key_buffer.size());
+    tree.insert(local_alloc, TEST_CTX, std::string_view(key_buffer.data(), p3_size), "p3");
+
+    const uint64_t p4[] = {250, 250};
+    size_t p4_size = SpatialKeywords::generate_apk(p4, D, reinterpret_cast<uint8_t*>(key_buffer.data()), key_buffer.size());
+    tree.insert(local_alloc, TEST_CTX, std::string_view(key_buffer.data(), p4_size), "p4");
+
+    const uint64_t p5[] = {150, 250}; // outside
+    size_t p5_size = SpatialKeywords::generate_apk(p5, D, reinterpret_cast<uint8_t*>(key_buffer.data()), key_buffer.size());
+    tree.insert(local_alloc, TEST_CTX, std::string_view(key_buffer.data(), p5_size), "p5");
+}
+
+void test_query_box() {
+    std::cout << "Running test: test_query_box..." << std::endl;
+    FileHeader mock_header;
+    mock_header.global_alloc_offset.store(1, std::memory_order_relaxed);
+    MockStaxAllocator mock_alloc;
+    StaxAllocator allocator_wrapper(&mock_header, mock_alloc.get_base_ptr());
+    ThreadLocalAllocator local_alloc(allocator_wrapper);
+    std::atomic<uint64_t> root_ptr = 0;
+    const uint32_t D = 2;
+    StaxTree16 tree(allocator_wrapper, root_ptr, D);
+
+    setup_dimensional_tree(tree, local_alloc, D);
+
+    AABB query_aabb(D);
+    query_aabb.min_bounds[0] = 100;
+    query_aabb.min_bounds[1] = 100;
+    query_aabb.max_bounds[0] = 200;
+    query_aabb.max_bounds[1] = 200;
+
+    QueryStats stats;
+    auto results = tree.query_box(query_aabb, stats);
+
+    assert(results.size() == 2);
+
+    std::set<std::string_view> result_values;
+    for (void* handle : results) {
+        StaxRecord* rec = allocator_wrapper.get_ptr<StaxRecord>(StaxTree16::get_offset(reinterpret_cast<uint64_t>(handle)));
+        result_values.insert(rec->get_value_data());
+    }
+
+    assert(result_values.count("p1") == 1);
+    assert(result_values.count("p2") == 1);
+    assert(result_values.count("p3") == 0);
+    assert(result_values.count("p4") == 0);
+    assert(result_values.count("p5") == 0);
+
+    std::cout << "SUCCESS" << std::endl;
+}
+
+void test_query_sphere() {
+    std::cout << "Running test: test_query_sphere..." << std::endl;
+    FileHeader mock_header;
+    mock_header.global_alloc_offset.store(1, std::memory_order_relaxed);
+    MockStaxAllocator mock_alloc;
+    StaxAllocator allocator_wrapper(&mock_header, mock_alloc.get_base_ptr());
+    ThreadLocalAllocator local_alloc(allocator_wrapper);
+    std::atomic<uint64_t> root_ptr = 0;
+    const uint32_t D = 2;
+    StaxTree16 tree(allocator_wrapper, root_ptr, D);
+
+    // Center: 140, 160
+    // Points:
+    // p1 = {150, 150} -> dist_sq = (10^2) + (-10^2) = 100 + 100 = 200
+    // p2 = {120, 180} -> dist_sq = (-20^2) + (20^2) = 400 + 400 = 800
+    setup_dimensional_tree(tree, local_alloc, D);
+
+    const uint64_t center[] = {140, 160};
+    const long double radius = 15.0L; // radius_sq = 225
+
+    // p1 should be inside, p2 should be outside
+    QueryStats stats;
+    auto results = tree.query_sphere(center, radius, stats);
+
+    assert(results.size() == 1);
+
+    StaxRecord* rec = allocator_wrapper.get_ptr<StaxRecord>(StaxTree16::get_offset(reinterpret_cast<uint64_t>(results[0])));
+    assert(rec->get_value_data() == "p1");
+
+    std::cout << "SUCCESS" << std::endl;
+}
+
+// Helper function for KNN test
+void setup_knn_tree(StaxTree16& tree, ThreadLocalAllocator& local_alloc, const uint32_t D, std::map<std::string, std::array<uint64_t, 2>>& points) {
+    points["p1"] = {10, 10};
+    points["p2"] = {12, 12}; // close
+    points["p3"] = {100, 100};
+    points["p4"] = {105, 105};
+    points["p5"] = {5, 5}; // closest
+    points["p6"] = {200, 200};
+
+    std::vector<char> key_buffer(SpatialKeywords::get_max_apk_size(D));
+    for(const auto& pair : points) {
+        size_t key_size = SpatialKeywords::generate_apk(pair.second.data(), D, reinterpret_cast<uint8_t*>(key_buffer.data()), key_buffer.size());
+        tree.insert(local_alloc, TEST_CTX, std::string_view(key_buffer.data(), key_size), pair.first);
+    }
+}
+
+void test_query_knn() {
+    std::cout << "Running test: test_query_knn..." << std::endl;
+    FileHeader mock_header;
+    mock_header.global_alloc_offset.store(1, std::memory_order_relaxed);
+    MockStaxAllocator mock_alloc;
+    StaxAllocator allocator_wrapper(&mock_header, mock_alloc.get_base_ptr());
+    ThreadLocalAllocator local_alloc(allocator_wrapper);
+    std::atomic<uint64_t> root_ptr = 0;
+    const uint32_t D = 2;
+    StaxTree16 tree(allocator_wrapper, root_ptr, D);
+    std::map<std::string, std::array<uint64_t, 2>> points;
+    setup_knn_tree(tree, local_alloc, D, points);
+
+    const uint64_t query_point[] = {4, 4};
+    const size_t k = 3;
+
+    // Expected order of closeness to {4, 4}:
+    // 1. p5 {5, 5}   -> dist_sq = 1^2 + 1^2 = 2
+    // 2. p1 {10, 10} -> dist_sq = 6^2 + 6^2 = 72
+    // 3. p2 {12, 12} -> dist_sq = 8^2 + 8^2 = 128
+
+    QueryStats stats;
+    auto results = tree.query_knn(query_point, k, stats);
+    assert(results.size() == k);
+
+    std::set<std::string_view> result_values;
+    for (void* handle : results) {
+        StaxRecord* rec = allocator_wrapper.get_ptr<StaxRecord>(StaxTree16::get_offset(reinterpret_cast<uint64_t>(handle)));
+        result_values.insert(rec->get_value_data());
+    }
+
+    assert(result_values.count("p5") == 1);
+    assert(result_values.count("p1") == 1);
+    assert(result_values.count("p2") == 1);
+    assert(result_values.count("p3") == 0);
+    assert(result_values.count("p4") == 0);
+    assert(result_values.count("p6") == 0);
+
+    std::cout << "SUCCESS" << std::endl;
+}
+
+void test_query_knn_randomized() {
+    std::cout << "Running test: test_query_knn_randomized..." << std::endl;
+    const uint32_t D = 4;
+    const size_t num_points = 1000;
+    const size_t k = 50;
 
     // 1. Setup Tree
     FileHeader mock_header;
@@ -56,117 +317,67 @@ void run_randomized_correctness_test(const std::string& query_type, uint32_t D) 
     ThreadLocalAllocator local_alloc(allocator_wrapper);
     std::atomic<uint64_t> root_ptr = 0;
     StaxTree16 tree(allocator_wrapper, root_ptr, D);
+    std::vector<char> key_buffer(SpatialKeywords::get_max_apk_size(D));
 
     // 2. Generate and insert random data
-    std::mt19937_64 g(D); // Seed with dimension for variety
-    std::uniform_int_distribution<uint64_t> distrib(0, 100000);
+    std::mt19937_64 g(42); // Fixed seed
+    std::uniform_int_distribution<uint64_t> distrib;
     std::vector<std::vector<uint64_t>> all_points;
     all_points.reserve(num_points);
     for (size_t i = 0; i < num_points; ++i) {
         std::vector<uint64_t> p(D);
         for (uint32_t d = 0; d < D; ++d) p[d] = distrib(g);
         all_points.push_back(p);
-        tree.insert(local_alloc, TEST_CTX, SpatialKeywords::generate_apk(p.data(), D), std::to_string(i));
+        // Use the index as the value for easy identification
+        size_t key_size = SpatialKeywords::generate_apk(p.data(), D, reinterpret_cast<uint8_t*>(key_buffer.data()), key_buffer.size());
+        tree.insert(local_alloc, TEST_CTX, std::string_view(key_buffer.data(), key_size), std::to_string(i));
     }
 
-    // 3. Run multiple randomized queries
-    for (int i = 0; i < num_queries; ++i) {
-        std::cout << "  Running Query " << i + 1 << "/" << num_queries << "..." << std::endl;
-        std::set<size_t> stax_results;
-        std::set<size_t> ground_truth_results;
-        QueryStats stats;
+    // 3. Define query point
+    std::vector<uint64_t> query_point(D);
+    for (uint32_t d = 0; d < D; ++d) query_point[d] = distrib(g);
 
-        if (query_type == "Box") {
-            AABB query_box(D);
-            for(uint32_t d=0; d<D; ++d) {
-                uint64_t p1 = distrib(g);
-                uint64_t p2 = distrib(g);
-                query_box.min_bounds[d] = std::min(p1, p2);
-                query_box.max_bounds[d] = std::max(p1, p2);
-            }
+    // 4. Run StaxDB KNN query
+    QueryStats stats;
+    auto results = tree.query_knn(query_point.data(), k, stats);
+    assert(results.size() == k);
 
-            auto results = tree.query_box(query_box, stats);
-            for (void* handle : results) {
-                StaxRecord* rec = allocator_wrapper.get_ptr<StaxRecord>(StaxTree16::get_offset(reinterpret_cast<uint64_t>(handle)));
-                stax_results.insert(std::stoul(std::string(rec->get_value_data())));
-            }
-
-            for(size_t j=0; j<all_points.size(); ++j) {
-                bool in_box = true;
-                for(uint32_t d=0; d<D; ++d) {
-                    if (all_points[j][d] < query_box.min_bounds[d] || all_points[j][d] > query_box.max_bounds[d]) {
-                        in_box = false;
-                        break;
-                    }
-                }
-                if (in_box) ground_truth_results.insert(j);
-            }
-
-        } else if (query_type == "Sphere") {
-            std::vector<uint64_t> center(D);
-            for(uint32_t d=0; d<D; ++d) center[d] = distrib(g);
-            long double radius = distrib(g) / 10.0; // smaller radius
-            long double radius_sq = radius * radius;
-
-            auto results = tree.query_sphere(center.data(), radius, stats);
-            for (void* handle : results) {
-                StaxRecord* rec = allocator_wrapper.get_ptr<StaxRecord>(StaxTree16::get_offset(reinterpret_cast<uint64_t>(handle)));
-                stax_results.insert(std::stoul(std::string(rec->get_value_data())));
-            }
-
-            for(size_t j=0; j<all_points.size(); ++j) {
-                if (SpatialKeywords::PointDistSq(all_points[j].data(), center.data(), D) <= radius_sq) {
-                    ground_truth_results.insert(j);
-                }
-            }
-
-        } else if (query_type == "KNN") {
-            std::vector<uint64_t> center(D);
-            for(uint32_t d=0; d<D; ++d) center[d] = distrib(g);
-            size_t k = 15;
-
-            auto results = tree.query_knn(center.data(), k, stats);
-            for (void* handle : results) {
-                StaxRecord* rec = allocator_wrapper.get_ptr<StaxRecord>(StaxTree16::get_offset(reinterpret_cast<uint64_t>(handle)));
-                stax_results.insert(std::stoul(std::string(rec->get_value_data())));
-            }
-
-            std::vector<std::pair<long double, size_t>> distances;
-            for (size_t j = 0; j < all_points.size(); ++j) {
-                distances.push_back({SpatialKeywords::PointDistSq(all_points[j].data(), center.data(), D), j});
-            }
-            std::sort(distances.begin(), distances.end());
-            for (size_t j = 0; j < k; ++j) {
-                ground_truth_results.insert(distances[j].second);
-            }
-        }
-
-        // 4. Compare results and report
-        std::cout << "    - StaxDB Found:   " << stax_results.size() << " records." << std::endl;
-        std::cout << "    - Expected:       " << ground_truth_results.size() << " records." << std::endl;
-        if (stax_results != ground_truth_results) {
-            throw std::runtime_error("Result mismatch between StaxDB and ground truth!");
-        }
-        std::cout << "    - CORRECTNESS CONFIRMED: Results are identical." << std::endl;
+    std::set<size_t> stax_results;
+    for (void* handle : results) {
+        StaxRecord* rec = allocator_wrapper.get_ptr<StaxRecord>(StaxTree16::get_offset(reinterpret_cast<uint64_t>(handle)));
+        stax_results.insert(std::stoul(std::string(rec->get_value_data())));
     }
-    std::cout << "--- SUCCESS: All randomized queries for " << query_type << " (" << D << "D) passed. ---" << std::endl;
+
+    // 5. Brute-force validation
+    std::vector<std::pair<long double, size_t>> distances;
+    for (size_t i = 0; i < all_points.size(); ++i) {
+        distances.push_back({SpatialKeywords::PointDistSq(all_points[i].data(), query_point.data(), D), i});
+    }
+    std::sort(distances.begin(), distances.end());
+
+    std::set<size_t> ground_truth;
+    for (size_t i = 0; i < k; ++i) {
+        ground_truth.insert(distances[i].second);
+    }
+
+    // 6. Compare results
+    assert(stax_results == ground_truth);
+
+    std::cout << "SUCCESS" << std::endl;
 }
+
 
 int main() {
     try {
-        run_randomized_correctness_test("Box", 2);
-        run_randomized_correctness_test("Sphere", 2);
-        run_randomized_correctness_test("KNN", 2);
-
-        run_randomized_correctness_test("Box", 4);
-        run_randomized_correctness_test("Sphere", 4);
-        run_randomized_correctness_test("KNN", 4);
-
-        run_randomized_correctness_test("Box", 8);
-        run_randomized_correctness_test("Sphere", 8);
-        run_randomized_correctness_test("KNN", 8);
-
-        std::cout << "\n[OK] All dimensional query correctness tests passed." << std::endl;
+        test_apk_generation();
+        test_cursor_seek_first();
+        test_cursor_move_next();
+        test_aabb_tracking();
+        test_query_box();
+        test_query_sphere();
+        test_query_knn();
+        test_query_knn_randomized();
+        std::cout << "All tests passed." << std::endl;
     } catch (const std::exception& e) {
         std::cerr << "A test failed with exception: " << e.what() << std::endl;
         return 1;

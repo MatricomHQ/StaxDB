@@ -5,7 +5,6 @@
 #include <string_view>
 #include "stax_tx/transaction.h"
 #include <array>
-#include <sstream> // For AABB::to_string
 
 // Maximum dimensions supported by the spatial index.
 constexpr size_t STAX_MAX_DIMENSIONS = 1024;
@@ -46,11 +45,9 @@ struct StaxPath {
     struct Frame {
         uint64_t node_ptr;
         int nibble_in_parent;
-        uint32_t test_idx;
     };
     std::vector<Frame> frames;
     uint64_t leaf_handle = 0;
-    int leaf_nibble_in_parent = -1;
 };
 
 struct AABB {
@@ -62,31 +59,8 @@ struct AABB {
         if (D > STAX_MAX_DIMENSIONS) {
             throw std::runtime_error("Dimensionality exceeds compile-time STAX_MAX_DIMENSIONS.");
         }
-        reset();
-    }
-
-    void reset() {
         min_bounds.fill(0);
         max_bounds.fill(UINT64_MAX);
-    }
-
-    std::string to_string() const {
-        std::stringstream ss;
-        ss << "AABB(D=" << D << ", min=[";
-        for (uint32_t i = 0; i < D; ++i) ss << min_bounds[i] << (i == D - 1 ? "" : ",");
-        ss << "], max=[";
-        for (uint32_t i = 0; i < D; ++i) ss << max_bounds[i] << (i == D - 1 ? "" : ",");
-        ss << "])";
-        return ss.str();
-    }
-
-    bool is_valid() const {
-        for (uint32_t i = 0; i < D; ++i) {
-            if (min_bounds[i] > max_bounds[i]) {
-                return false;
-            }
-        }
-        return true;
     }
 };
 
